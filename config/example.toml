@@ -1,0 +1,137 @@
+# vshm Configuration Example
+# Place this file at /etc/vshm/vshm.toml
+
+# [agent] section (required)
+[agent]
+  # host_name: explicit stable identity (required, no hostname inference)
+  host_name = "my-server"
+  
+  # interval: check run interval (default: 30m, range: 1m-7d)
+  interval = "30m"
+  
+  # timeout: check timeout (default: 10s, range: 1s-300s, must be < interval)
+  timeout = "10s"
+  
+  # report_time: daily report time (default: 09:00, uses server-local time)
+  report_time = "2006-01-02T09:00:00Z"
+  
+  # room_id: Matrix room ID for notifications
+  room_id = "!roomid:matrix.org"
+
+# [metrics] section (optional)
+[metrics]
+  # mounts: filesystem mounts to monitor (default: [])
+  mounts = []
+
+# [storage] section (optional)
+[storage]
+  # pending_max_age: max age of pending events (default: 24h)
+  pending_max_age = "24h"
+  
+  # min_available_bytes: minimum available disk space (default: 104857600 bytes = 100MB)
+  min_available_bytes = 104857600
+
+# [[checks]] list (may be empty)
+[[checks]]
+  # check_id: unique identifier (required, format: [a-zA-Z0-9][a-zA-Z0-9_.-]{0,63})
+  check_id = "systemd-check"
+  
+  # type: check type (required, one of: systemd, http, ping, mysql, webdav)
+  type = "systemd"
+  
+  # systemd-specific: target unit to monitor
+  target = "multi-user.target"
+  
+  # interval: override global interval (optional, range: 1m-7d)
+  interval = "5m"
+  
+  # timeout: override global timeout (optional, range: 1s-300s)
+  timeout = "30s"
+
+[[checks]]
+  # check_id: unique identifier
+  check_id = "http-check"
+  
+  # type: check type
+  type = "http"
+  
+  # http-specific: URL to check
+  url = "https://example.com/health"
+  
+  # http-specific: expected HTTP status code (default: 200)
+  expected_status = 200
+  
+  # http-specific: optional body substring to check
+  contains = "healthy"
+  
+  # http-specific: optional credential file path
+  # credential_file = "/etc/vshm/secrets/http.ini"
+  
+  interval = "1m"
+  timeout = "10s"
+
+[[checks]]
+  # check_id: unique identifier
+  check_id = "ping-check"
+  
+  # type: check type
+  type = "ping"
+  
+  # ping-specific: host to ping
+  host = "192.168.1.1"
+  
+  interval = "5m"
+  timeout = "10s"
+
+[[checks]]
+  # check_id: unique identifier
+  check_id = "mysql-check"
+  
+  # type: check type
+  type = "mysql"
+  
+  # mysql-specific: host to connect to
+  host = "localhost"
+  
+  # mysql-specific: port (default: 3306)
+  port = 3306
+  
+  # mysql-specific: database to check (optional, explicit check overrides file database)
+  database = "monitoring"
+  
+  # mysql-specific: credential file path
+  credential_file = "/etc/vshm/secrets/mysql.ini"
+  
+  # mysql-specific: optional TLS CA certificate
+  tls_ca = "/etc/vshm/certs/ca.pem"
+  
+  # mysql-specific: optional query to execute
+  query = "SELECT 1"
+  
+  interval = "5m"
+  timeout = "10s"
+
+[[checks]]
+  # check_id: unique identifier
+  check_id = "webdav-check"
+  
+  # type: check type
+  type = "webdav"
+  
+  # webdav-specific: URL to check
+  url = "https://example.com/dav"
+  
+  # webdav-specific: depth (required, must be 0 or 1)
+  depth = 0
+  
+  # webdav-specific: optional credential file path
+  # credential_file = "/etc/vshm/secrets/webdav.ini"
+  
+  interval = "5m"
+  timeout = "10s"
+
+# Logging level: debug, info, warn, error
+log_level = "info"
+
+# State directory
+state_dir = "/var/lib/vshm"

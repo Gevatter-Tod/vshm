@@ -1,0 +1,20 @@
+[Unit]
+Description=Very Simple Host Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=vshm
+Group=vshm
+ExecStart=/usr/bin/vshm
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vshm
+
+[Install]
+WantedBy=multi-user.target

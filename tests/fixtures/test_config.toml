@@ -1,0 +1,22 @@
+# Test configuration for vshm
+[checks]
+  [[checks.systemd]]
+    check_id = "test-systemd"
+    target = "multi-user.target"
+    interval = "5m"
+    timeout = "30s"
+  
+  [[checks.http]]
+    check_id = "test-http"
+    url = "https://example.com/health"
+    interval = "1m"
+    timeout = "10s"
+  
+  [[checks.ping]]
+    check_id = "test-ping"
+    host = "192.168.1.1"
+    interval = "5m"
+    timeout = "10s"
+
+log_level = "info"
+state_dir = "/tmp/vshm-test"
