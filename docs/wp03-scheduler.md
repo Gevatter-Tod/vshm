@@ -21,7 +21,7 @@ type Store interface {
   EnqueueReport(context.Context, string, OutboxEvent) (bool, error)
   Pending(context.Context, time.Time, int) ([]OutboxEvent, error)
   MarkDelivery(context.Context, string, DeliveryOutcome, time.Time, time.Time, string) error
-  Prune(context.Context, time.Time, int64) (PruneResult, error)
+  Prune(context.Context, time.Time) (PruneResult, error)
   Status(context.Context, time.Time) (StoreStatus, error)
   Close() error
 }
@@ -38,7 +38,7 @@ This package consumes WP-00 `CheckResult`, `Clock`, `Store`, `Transport`, `Notif
 `internal/scheduler/`; `internal/model/` changes only via WP-00 request; `tests/fixtures/`; `internal/cli/` coordinated with WP-13.
 
 ## 5 Requirements (self-contained, from spec)
-Global interval default 30m, timeout 10s, per-check overrides; intervals 1m–7d, timeouts 1–300s and less than interval. Four fixed workers, distinct checks concurrently, never overlap same check. Every check runs promptly after startup then monotonic cadence. No missed ticks replay; skip due tick if previous execution still active and log skip, no fabricated failure. Exactly one absolute deadline created at worker execution start spans DNS, connect, I/O, complete query/response, subprocess; same context propagated, no reset. On deadline exactly one failed observation. Close owned connections and terminate owned subprocess process group. Cleanup-only grace max 2s; if cleanup not finished mark unhealthy and exit nonzero for systemd restart, leaving no worker/child. Persist only executions actually run; downtime never creates failure/recovery. Results go to incident service; no direct store/outbox writes.
+Global interval default 30m, timeout 10s, per-check overrides; intervals 1m–7d, timeouts 1–300s and less than interval. Four fixed workers, distinct checks concurrently, never overlap same check. Every check runs promptly after startup then monotonic cadence. No missed ticks replay; skip due tick if previous execution still active and log skip, no fabricated failure. Exactly one absolute deadline created at worker execution start spans DNS, connect, I/O, complete query/response, subprocess; same context propagated, no reset. On deadline exactly one failed observation. Close owned connections and terminate owned subprocess process group. Cleanup-only grace max 2s; if cleanup not finished mark unhealthy and exit nonzero for systemd restart, leaving no worker/child. Persist only executions actually run; downtime never creates failure/recovery. Results go to incident service; no direct store/outbox writes. call Store.Prune once per hour.
 
 ## 6 Design decisions already fixed
 Inject clock/timer and checker interfaces. Schedule based on monotonic clock; store actual timestamps UTC. Single timeout result guard prevents racing adapter result and timeout from double emission. Skip logs sanitized.

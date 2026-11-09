@@ -1,57 +1,94 @@
-# wp02-storage — implementation brief
+# wp02-storage — implementation brief (simplified)
 
 ## 1 Purpose
-SQLite store, schema migrations, retention, single-instance lock, bounded storage/expiry/low-space policy.
+One small SQLite store for vshm: a handful of tables, one transaction helper, a single-instance file lock, and time-based pruning. Nothing else. All "low disk space" handling from the previous version of this brief is **removed**: a storage error is returned to the caller, logged, and the agent carries on with the next tick.
 
-## 2 Dependencies (other WPs) and what can run in parallel
-WP-00. Parallel with config/check adapters/scheduler once schema and signatures frozen; integrate WP-10/11/12 atomics.
+## 2 Dependencies and parallelism
+Depends on WP-00 (model types). Can run in parallel with WP-01 and WP-03–09. WP-10/11/12 call the store methods below.
 
-## 3 Interfaces consumed / provided (reference WP-00 names, repeat signatures the agent needs)
-### Shared Go API (WP-00 contract; repeat needed signatures)
+## 3 Interface provided (WP-00 `Store`, unchanged except one parameter)
 ```go
-type Check interface { Type() string; Run(ctx context.Context, cfg CheckConfig) CheckResult }
-type CheckConfig interface { CheckID() string; CheckType() string }
-type CheckResult struct { CheckID string; CheckType string; Success bool; StartedAt time.Time; CompletedAt time.Time; Duration time.Duration; ReasonCode string; Reason string }
-type Clock interface { Now() time.Time; NewTimer(time.Duration) Timer }
-type Timer interface { C() <-chan time.Time; Stop() bool; Reset(time.Duration) bool }
 type Store interface {
-  RecordObservation(context.Context, CheckResult) error
-  RecordObservationAndIncident(context.Context, CheckResult, IncidentMutation, []OutboxEvent) error
-  Snapshot(context.Context, time.Time) (Snapshot, error)
-  EnqueueReport(context.Context, string, OutboxEvent) (bool, error)
-  Pending(context.Context, time.Time, int) ([]OutboxEvent, error)
-  MarkDelivery(context.Context, string, DeliveryOutcome, time.Time, time.Time, string) error
-  Prune(context.Context, time.Time, int64) (PruneResult, error)
-  Status(context.Context, time.Time) (StoreStatus, error)
+  RecordObservation(ctx context.Context, r CheckResult) error
+  RecordObservationAndIncident(ctx context.Context, r CheckResult, m IncidentMutation, ev []OutboxEvent) error
+  Snapshot(ctx context.Context, now time.Time) (Snapshot, error)
+  EnqueueReport(ctx context.Context, reportKey string, ev OutboxEvent) (inserted bool, err error)
+  Pending(ctx context.Context, now time.Time, limit int) ([]OutboxEvent, error)
+  MarkDelivery(ctx context.Context, eventID string, out DeliveryOutcome, attemptedAt, nextAttemptAt time.Time, reason string) error
+  Prune(ctx context.Context, now time.Time) (PruneResult, error)   // CHANGED: the former int64 "min free bytes" argument is dropped
+  Status(ctx context.Context, now time.Time) (StoreStatus, error)
   Close() error
 }
-type Transport interface { Validate(context.Context) (Compatibility, error); Send(context.Context, OutboxEvent) (DeliveryOutcome, error) }
-type Notifier interface { Enqueue(context.Context, []OutboxEvent) error }
-type Reporter interface { Render(context.Context, Snapshot, time.Time) (OutboxEvent, error); Schedule(context.Context) error }
-type Registry interface { Register(string, Check) error; Get(string) (Check, bool); Types() []string }
 ```
-These are concrete proposed API signatures to freeze in WP-00; refine only in WP-00 before other packages code. Supporting proposed model types: `IncidentMutation`, `OutboxEvent`, `Snapshot`, `PruneResult`, `StoreStatus`, `Compatibility`, `DeliveryOutcome`; all must be defined in `internal/model` or owned WP-00 packages without secret serialization. The `Check` adapter receives validated immutable typed config and a single context deadline. `CheckResult` timestamps are UTC; `Reason` short/sanitized. Add `context` import as required. Signatures/API shape are **proposed — confirm with user**, as spec defines responsibilities but no Go signatures.
+Constructor: `func Open(ctx context.Context, path string, clock Clock, opts Options) (*SQLiteStore, error)` where `Options{ObservationRetention, DeliveredRetention, PendingMaxAge time.Duration; MaxPending int}` with defaults 90d / 30d / 24h / 1000. `Open` acquires the lock, opens the DB, creates the schema. No separate migration step exists.
 
-This package consumes WP-00 `CheckResult`, `Clock`, `Store`, `Transport`, `Notifier`, `Reporter`, `Registry`, `CheckConfig`, and related model types as relevant; it provides only its assigned concrete adapter/service. It must not modify shared signatures outside an explicit user-approved WP-00 change.
+## 4 Files
+`internal/storage/store.go` (Open, Close, tx helper, lock), `internal/storage/schema.go` (one `const schema string`), `internal/storage/observations.go`, `internal/storage/outbox.go`, `internal/storage/prune.go`, `internal/storage/store_test.go`. Touch `docs/architecture.md` (one paragraph). Target: ≤ 600 lines of non-test Go.
 
-## 4 Files to create/touch (exact paths in the required tree)
-`internal/storage/`; `internal/model/` changes only by proposal; `tests/fixtures/`; `docs/architecture.md`.
+## 5 Schema (fixed, v1 — create with `CREATE TABLE IF NOT EXISTS`, no migration framework)
+```sql
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);   -- one row: schema_version=1
+CREATE TABLE IF NOT EXISTS observations (
+  id INTEGER PRIMARY KEY, check_id TEXT NOT NULL, check_type TEXT NOT NULL,
+  success INTEGER NOT NULL, started_at TEXT NOT NULL, completed_at TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL, reason_code TEXT NOT NULL, reason TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS observations_completed ON observations(completed_at);
+CREATE INDEX IF NOT EXISTS observations_check ON observations(check_id, completed_at);
+CREATE TABLE IF NOT EXISTS incidents (
+  check_id TEXT PRIMARY KEY, state TEXT NOT NULL, consecutive_failures INTEGER NOT NULL,
+  since TEXT NOT NULL, last_change TEXT NOT NULL, last_reason TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY,                -- insertion order == send order
+  event_id TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,                    -- 'event' | 'report'
+  dedupe_key TEXT UNIQUE,                -- report local date key; NULL for events
+  body TEXT NOT NULL,
+  enqueued_at TEXT NOT NULL, status TEXT NOT NULL,   -- 'pending' | 'delivered' | 'expired' | 'dropped'
+  attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, finished_at TEXT, last_reason TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(status, next_attempt_at);
+```
+All timestamps are RFC3339 UTC strings. If `meta.schema_version` exists and is not `1`, `Open` fails with a clear error (future versions add migrations then; not now).
 
-## 5 Requirements (self-contained, from spec)
-Implement exact WP-00 proposed schema only after user approves. SQLite pure-Go modernc v1.61.1, WAL, bounded busy timeout, bounded transactions and short consistent read snapshots; migrations versioned. Persist UTC completion/enqueue times; increasing deterministic event sequence. Atomic observation + incident + event per failure/recovery; report-date unique key + event in same transaction, key first. Delivered event retention 30d; observations 90d; incident current state/report keys indefinite. Process lock ensures one `run`; second fails clearly. State dir 0700 vshm:vshm, DB/lock 0600.
+## 6 Behaviour
+**Connection.** `modernc.org/sqlite v1.61.1`, DSN `file:<path>?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)`. `db.SetMaxOpenConns(1)`. Chmod DB and lock file 0600 after creation. One helper: `func (s *SQLiteStore) tx(ctx, fn func(*sql.Tx) error) error` — begin, run, commit, rollback on error. Every method is exactly one `tx` call.
 
-Before startup and each write transaction check accessible bytes on DB filesystem; reading failure = visible fault/no destructive action. Expire pending events older than configured pending_max_age (default 24h) before delivery; expiry first. If free bytes below configured 100 MiB default threshold, evict oldest pending first, one bounded row/batch at a time, each row at most once per trigger, until threshold or none. Maintain durable discard aggregate counters by reason, transactionally with deletes; distinguish age expiry vs low-space eviction. Commit failure means do not claim deletion/accounting. Checkpoint after each committed pruning batch, attempt WAL truncate when safe, recheck space. No VACUUM/emergency file deletion; logical deletion may not release filesystem bytes. Preserve incident state, observations and report keys; delivered/other state not eviction candidates.
+**Lock.** `Open` creates `<statedir>/vshm.lock` and calls `syscall.Flock(fd, LOCK_EX|LOCK_NB)`. `EWOULDBLOCK` → return `ErrAlreadyRunning`. The fd stays open until `Close`. Nothing more.
 
-On observation/report/outbox storage-capacity error (SQLite full, ENOSPC, quota), expire old rows and force pruning, discard oldest pending first and continue while below threshold/no rows, checkpoint/recheck, then retry original failed transaction exactly once. If no pending row, still checkpoint/recheck. Retry once even if pruning/checkpoint fails; report storage fault on pruning/checkpoint failure or retry failure. Do not prune on corruption, malformed DB, permission, non-capacity errors. Preserve prior committed state. Ordered retries/expiry policy shared with WP-12.
+**RecordObservation.** Insert one row.
 
-## 6 Design decisions already fixed
-Centralize all DB writes through store transactions; make committed success explicit. Keep snapshots short. SQLite logical delete != filesystem free. No deleting unrelated files or incidents for recovery. Fault/status reporting sanitized and bounded. Lock protects agent process; Matrix sender/crypto lock is separately coordinated by WP-12.
+**RecordObservationAndIncident.** In one tx: insert observation; `INSERT OR REPLACE` the incident row from `IncidentMutation`; insert each `OutboxEvent` with `kind='event', status='pending', next_attempt_at=enqueued_at`.
 
-## 7 Open questions — "ASK THE USER before implementing"
-Ask user to approve schema and operation-level transaction API from WP-00; SQLite table details are absent in spec. Confirm how `min_available_bytes` filesystem probe will be implemented/tested, quotas and busy/full classification, batch size, checkpoint conditions and lock file mechanism. These implementation choices are proposed — confirm with user.
+**EnqueueReport.** In one tx: `INSERT OR IGNORE` with `kind='report', dedupe_key=reportKey`. Return `inserted = rowsAffected == 1`. This is the whole "report key first, same transaction" requirement.
 
-## 8 Acceptance tests (from spec §8 where applicable, plus package-specific)
-§8: temp SQLite, transactional observation/state/outbox and report key; restart persistence; 30-/90-day retention; pending survives restart then 24h expiry/oldest-first eviction; counts distinguish discarded vs delivered; low/full disk pruning/checkpoint/recheck/one retry; corruption/permission does not prune; storage faults; second instance refused.
+**Pending.** In one tx: `UPDATE outbox SET status='expired', finished_at=now WHERE status='pending' AND enqueued_at < now-PendingMaxAge`; then `SELECT … WHERE status='pending' AND next_attempt_at <= now ORDER BY id LIMIT ?`. Expiry-before-delivery is thereby guaranteed.
 
-## 9 Definition of done (reference the common DoD in overview.md plus package-specific runtime validation steps)
-Complete all eight items in the common Definition of Done in `overview.md`, including evidence and completion report. Package runtime validation: Run storage tests with temporary DB and fault-injected capacity/busy/corruption/filesystem providers; run `vshm status` and `vshm run` with temporary state path; prove concurrent second `run` refusal. Never use live `/var/lib/vshm` in tests.
+**MarkDelivery.** `Delivered` → status delivered, finished_at. `Failed`/`Ambiguous` → attempts+1, next_attempt_at, last_reason (WP-12 computes the backoff and passes `nextAttemptAt`; the store does not own retry policy). `GaveUp` → status dropped.
+
+**Bounded queue (replaces low-space eviction).** After every outbox insert, in the same tx: `UPDATE outbox SET status='dropped', last_reason='queue_full', finished_at=now WHERE status='pending' AND id NOT IN (SELECT id FROM outbox WHERE status='pending' ORDER BY id DESC LIMIT MaxPending)`. Oldest pending are dropped first; the table can never hold more than `MaxPending` pending rows.
+
+**Prune.** Called by the scheduler once per hour (WP-03) and by `vshm prune`. Loop in batches of 500 until 0 rows affected, one tx per batch:
+`DELETE FROM observations WHERE id IN (SELECT id FROM observations WHERE completed_at < ? LIMIT 500)` (cutoff now-90d), and the same pattern for `outbox WHERE status != 'pending' AND finished_at < ?` (cutoff now-30d). Then `PRAGMA wal_checkpoint(TRUNCATE)` once (ignore its result). Incidents and report dedupe rows are never deleted (report rows older than 30d keep their `dedupe_key` because they are deleted only when `status != 'pending'`… **correction:** report rows must keep the key indefinitely, so the outbox delete adds `AND kind = 'event'`; delivered report rows are small and stay). `PruneResult{Observations, OutboxRows int64}`.
+
+**Snapshot / Status.** Single read tx. `Snapshot`: all incident rows + latest observation per check (`SELECT … GROUP BY check_id HAVING MAX(completed_at)`), plus 24h success/failure counts per check. `StoreStatus`: DB file size (`os.Stat`), counts of outbox rows per status, counts of observations, schema version, lock path. Counting `expired` vs `dropped` vs `delivered` rows replaces the former durable discard counters.
+
+**Errors.** Any SQLite error (including `SQLITE_FULL` / `ENOSPC`) is wrapped with the operation name and returned. The store does **not** probe free space, does not retry, does not evict on error, does not VACUUM, never deletes files. Callers log a sanitized message and continue; nothing is ever claimed committed unless `tx` returned nil. No SQL text or row content in logs.
+
+## 7 Fixed decisions (do not ask the user)
+Schema above is final for v1. Lock = flock. Batch size 500. Default caps 90d/30d/24h/1000. Capacity handling = bounded pending queue + time pruning only; disk-full is an operator problem surfaced through `vshm status` and journal logs. Matrix crypto-store locking belongs to WP-12.
+
+## 8 Open questions
+None. Implement as written; propose changes via a separate note if a WP-00 type does not fit.
+
+## 9 Acceptance tests (`store_test.go`, temp dir, real SQLite, fake clock)
+1. Open creates schema, lock file 0600, DB 0600; second `Open` on same dir returns `ErrAlreadyRunning`; after `Close` it succeeds.
+2. RecordObservationAndIncident is atomic: inject a failing OutboxEvent (e.g. duplicate event_id) and assert neither observation nor incident row exists.
+3. EnqueueReport: same key twice → `true` then `false`, one row.
+4. Pending: rows older than 24h come back as `expired` and are not returned; ordering is by id; `next_attempt_at` in the future is skipped.
+5. MarkDelivery transitions and attempt counting.
+6. Queue bound: insert MaxPending+5 events → exactly MaxPending pending, 5 oldest `dropped` with reason `queue_full`.
+7. Prune: observations at 91d deleted, 89d kept; delivered events at 31d deleted; incidents and report rows kept at any age; returns correct counts.
+8. Reopen after Close: all rows persist.
+9. Status counts per outbox status are correct.
+
+## 10 Definition of done
+Common DoD from `overview.md`. Runtime validation: `go test ./internal/storage/`, `vshm status` against a temp state dir, and a second `vshm run` refused while the first holds the lock. Never use live `/var/lib/vshm`.

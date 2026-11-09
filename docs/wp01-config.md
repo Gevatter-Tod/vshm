@@ -21,7 +21,7 @@ type Store interface {
   EnqueueReport(context.Context, string, OutboxEvent) (bool, error)
   Pending(context.Context, time.Time, int) ([]OutboxEvent, error)
   MarkDelivery(context.Context, string, DeliveryOutcome, time.Time, time.Time, string) error
-  Prune(context.Context, time.Time, int64) (PruneResult, error)
+  Prune(context.Context, time.Time) (PruneResult, error)
   Status(context.Context, time.Time) (StoreStatus, error)
   Close() error
 }
@@ -38,7 +38,7 @@ This package consumes WP-00 `CheckResult`, `Clock`, `Store`, `Transport`, `Notif
 `internal/config/`; `internal/model/` only via WP-00 request; `cmd/vshm/main.go` / `internal/cli/` command hook coordinated with WP-13; `config/example.toml`; `tests/fixtures/`.
 
 ## 5 Requirements (self-contained, from spec)
-`/etc/vshm/vshm.toml`; `[agent]` required and `host_name` required explicit stable identity (no hostname inference), `interval=30m`, `timeout=10s`, `report_time=09:00`, `room_id`. No timezone key. `[metrics]` optional, `mounts=[]` default (**proposed — confirm with user**, since the spec defines configured mounts but not the omitted-key default). `[storage]` optional: `pending_max_age=24h`, `min_available_bytes=104857600` positive bytes. `[[checks]]` list may be empty; IDs match `[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}`, unique. Per-check `interval`/`timeout` override global. Durations positive; interval 1m–7d; timeout 1–300s and less than effective interval. Unknown keys, malformed values, bad paths, missing required monitoring files, duplicate IDs, invalid ranges fail clearly. Validation has no network/send side effects, matrix readiness is separate and not required to start. Invalid config must not mutate persisted state.
+`/etc/vshm/vshm.toml`; `[agent]` required and `host_name` required explicit stable identity (no hostname inference), `interval=30m`, `timeout=10s`, `report_time=09:00`, `room_id`. No timezone key. `[metrics]` optional, `mounts=[]` default (**proposed — confirm with user**, since the spec defines configured mounts but not the omitted-key default). `[storage]` optional: `pending_max_age=24h`, `max_pending=1000` positive integer. `[[checks]]` list may be empty; IDs match `[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}`, unique. Per-check `interval`/`timeout` override global. Durations positive; interval 1m–7d; timeout 1–300s and less than effective interval. Unknown keys, malformed values, bad paths, missing required monitoring files, duplicate IDs, invalid ranges fail clearly. Validation has no network/send side effects, matrix readiness is separate and not required to start. Invalid config must not mutate persisted state.
 
 Check schema: systemd `id,type,unit`; HTTP `id,type,url,expected_status` default 200, optional `contains`, optional `credential_file`; ping `id,type,host`; MySQL `id,type,host,port` default 3306, `database`, `credential_file`, `tls_ca`, `query`; WebDAV `id,type,url,depth` required 0/1, optional `credential_file`. HTTP/WebDAV Basic INI `[basic] username,password`, only verified HTTPS; reject credentials over HTTP. MySQL INI `[client] user,password`, optional database; explicit check `database` overrides file database. TCP MySQL requires `tls_ca`; local Unix socket permitted without network TLS. Config secrets never stored in general model serialization/logging. Config root:vshm 0640. Credentials separate, root:vshm 0640, not group/other-writable, readable only by authorized service group; fail closed on ownership/mode/permission issues. Do not include real credentials in example.
 

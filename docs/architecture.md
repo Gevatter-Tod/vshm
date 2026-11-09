@@ -1,61 +1,21 @@
-# Architecture
+# vshm Architecture
 
-## Overview
+vshm is a single-binary host monitoring agent that runs under systemd. It consists of:
 
-vshm is a simple host monitoring agent that runs as a systemd service on Linux amd64 systems. It monitors configured checks, records observations locally in SQLite, and queues events for delivery via Matrix.
+- **CLI** (`cmd/vshm/main.go`): Entry point with subcommands for validation, running, and status.
+- **Config** (`internal/config`): TOML configuration with validation and secrets handling.
+- **Storage** (`internal/storage`): SQLite-backed persistence with process locking, schema management, and time-based pruning.
+- **Scheduler** (`internal/scheduler`): Monotonic cadence with four concurrent workers, non-overlapping checks, and deadline enforcement.
+- **Check Adapters** (`internal/checks`): Read-only check implementations (systemd, HTTP, ping, MySQL, WebDAV).
+- **Incidents** (`internal/incidents`): Threshold-based incident detection and state transitions.
+- **Reports** (`internal/reports`): Daily report generation with DST-aware scheduling.
+- **Outbox** (`internal/outbox`): Ordered retry queue with expiry and bounded capacity.
+- **Matrix Transport** (`internal/matrixtransport`): Encrypted Matrix event delivery via CLI.
+- **Metrics** (`internal/metrics`): Linux system metrics collection for reporting.
+- **Logging** (`internal/logging`): Sanitized, bounded journal logging.
 
-## Components
+All components share the `internal/model` contracts established in WP-00.
 
-### Core Components
+## Storage
 
-- **CLI** (`internal/cli/`): Command-line interface for validation, one-shot checks, and continuous monitoring
-- **Config** (`internal/config/`): TOML configuration loading and validation
-- **Model** (`internal/model/`): Shared domain types and interfaces
-- **Storage** (`internal/storage/`): SQLite storage with migrations and process locking
-- **Logging** (`internal/logging/`): Sanitized logging
-
-### Check Adapters
-
-- **Systemd** (`internal/checks/systemd/`): Monitors systemd unit states
-- **HTTP** (`internal/checks/http/`): HTTP endpoint health checks
-- **Ping** (`internal/checks/ping/`): Network connectivity checks
-- **MySQL** (`internal/checks/mysql/`): Database connectivity checks
-- **WebDAV** (`internal/checks/webdav/`): WebDAV availability checks
-
-### Services
-
-- **Scheduler** (`internal/scheduler/`): Monotonic cadence with fixed concurrency
-- **Incidents** (`internal/incidents/`): Incident state management
-- **Reports** (`internal/reports/`): Daily report generation
-- **Outbox** (`internal/outbox/`): Ordered retry and delivery management
-- **Matrix Transport** (`internal/matrixtransport/`): Encrypted Matrix event delivery
-- **Metrics** (`internal/metrics/`): System metrics collection
-
-## Data Flow
-
-1. **Configuration**: Loaded from `/etc/vshm/vshm.toml` at startup
-2. **Checks**: Run according to scheduler cadence
-3. **Observations**: Stored in SQLite (`/var/lib/vshm/`)
-4. **Incidents**: Created when checks fail persistently
-5. **Outbox**: Events queued for Matrix delivery
-6. **Matrix**: Encrypted events sent via `matrix-commander-rs`
-
-## Security
-
-- Config: `/etc/vshm/vshm.toml` (root:vshm, 0640)
-- Secrets: `/etc/vshm/secrets/*.ini` (root:vshm, 0640)
-- State: `/var/lib/vshm` (vshm:vshm, 0700)
-- No CAP_NET_RAW for ping checks
-- Read-only target access
-
-## Build
-
-```bash
-CGO_ENABLED=0 go build -o vshm ./cmd/vshm
-```
-
-## Runtime
-
-```bash
-systemctl enable --now vshm
-```
+`storage.Open(ctx, <statedir>/vshm.db, clock, opts)` takes an exclusive `flock` on `<statedir>/vshm.lock` (a second instance gets `ErrAlreadyRunning`), opens SQLite in WAL mode with a single connection, and creates the fixed v1 schema (`meta`, `observations`, `incidents`, `outbox`) with `CREATE TABLE IF NOT EXISTS`. A `schema_version` other than `1` is rejected. The DB and lock files are mode 0600. Every store method runs in one transaction. Observations, the incident row and outbox events are written atomically. Daily reports are deduplicated through the `outbox.dedupe_key` unique column. At most `MaxPending` (default 1000) rows can be pending: when the limit is exceeded, the oldest are marked `dropped` with reason `queue_full`. `Pending` first expires rows older than `PendingMaxAge` (default 24h). `Prune` deletes observations older than 90 days and finished event rows older than 30 days, in batches of 500. Incidents and report rows are kept. The store never probes free disk space. SQLite errors, including disk-full, are wrapped and returned to the caller, which logs them and continues. `vshm status [statedir]` shows the DB size, schema version, observation count and outbox counts per status.

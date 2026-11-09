@@ -60,6 +60,7 @@ WP-00 (Foundation) has been completed. This workpackage established the project 
 - `Snapshot` - System state snapshot
 - `PruneResult` - Pruning result
 - `StoreStatus` - Storage health status
+- `storage.Options` and `storage.ErrAlreadyRunning` - Storage setup and process-lock contract
 - `Compatibility` - Transport compatibility
 - `DeliveryOutcome` - Delivery result
 - `DeliveryState` - Outbox state
@@ -73,7 +74,7 @@ WP-00 (Foundation) has been completed. This workpackage established the project 
 - `results_history` - Historical check results
 - `outbox` - Queued events for delivery
 - `report_dates` - Report date tracking
-- `discard_counters` - Discard reason counts
+- Outbox status counts are reported through `StoreStatus`; discard counters are not persisted
 
 ### Indexes
 - `incidents_check_idx` - Incident lookup

@@ -15,14 +15,12 @@ type Store struct {
 	incidents    []model.IncidentSummary
 	outbox       []model.OutboxEvent
 	reportDates  map[string]string
-	discardCount map[string]int64
 }
 
 // NewStore creates a new fake store.
 func NewStore() *Store {
 	return &Store{
 		reportDates: make(map[string]string),
-		discardCount: make(map[string]int64),
 	}
 }
 
@@ -42,14 +40,14 @@ func (s *Store) RecordObservationAndIncident(ctx context.Context, result model.C
 
 	s.observations = append(s.observations, result)
 	s.incidents = append(s.incidents, model.IncidentSummary{
-		IncidentID:   "test-incident",
-		HostName:     mutation.HostName,
-		CheckID:      mutation.CheckID,
-		OpenedAt:     mutation.LastFailure,
-		LastFailure:  mutation.LastFailure,
-		ReasonCode:   mutation.ReasonCode,
-		Reason:       mutation.Reason,
-		ResolvedAt:   mutation.ResolvedAt,
+		IncidentID:  "test-incident",
+		HostName:    mutation.HostName,
+		CheckID:     mutation.CheckID,
+		OpenedAt:    mutation.LastFailure,
+		LastFailure: mutation.LastFailure,
+		ReasonCode:  mutation.ReasonCode,
+		Reason:      mutation.Reason,
+		ResolvedAt:  mutation.ResolvedAt,
 	})
 	s.outbox = append(s.outbox, events...)
 	return nil
@@ -61,9 +59,8 @@ func (s *Store) Snapshot(ctx context.Context, now time.Time) (model.Snapshot, er
 	defer s.mu.RUnlock()
 
 	return model.Snapshot{
-		Checks:     make([]model.CheckStatus, 0),
-		Incidents:  s.incidents,
-		DiscardCounts: s.discardCount,
+		Checks:    make([]model.CheckStatus, 0),
+		Incidents: s.incidents,
 	}, nil
 }
 
@@ -101,15 +98,32 @@ func (s *Store) MarkDelivery(ctx context.Context, eventID string, outcome model.
 }
 
 // Prune removes old records.
-func (s *Store) Prune(ctx context.Context, cutoff time.Time, maxAge int64) (model.PruneResult, error) {
+func (s *Store) Prune(ctx context.Context, now time.Time) (model.PruneResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	removed := int64(0)
-	s.observations = s.observations[:0]
-	s.incidents = s.incidents[:0]
-	s.outbox = s.outbox[:0]
-	return model.PruneResult{RecordsRemoved: removed}, nil
+	observationCutoff := now.Add(-90 * 24 * time.Hour)
+	observations := s.observations[:0]
+	for _, observation := range s.observations {
+		if observation.CompletedAt.Before(observationCutoff) {
+			continue
+		}
+		observations = append(observations, observation)
+	}
+	removedObservations := int64(len(s.observations) - len(observations))
+	s.observations = observations
+
+	outboxCutoff := now.Add(-30 * 24 * time.Hour)
+	outbox := s.outbox[:0]
+	for _, event := range s.outbox {
+		if event.Kind != "report" && event.DeliveryState != model.StatePending && event.DeliveredAt.Before(outboxCutoff) {
+			continue
+		}
+		outbox = append(outbox, event)
+	}
+	removedOutboxRows := int64(len(s.outbox) - len(outbox))
+	s.outbox = outbox
+	return model.PruneResult{Observations: removedObservations, OutboxRows: removedOutboxRows}, nil
 }
 
 // Status returns storage health.
@@ -118,9 +132,24 @@ func (s *Store) Status(ctx context.Context, now time.Time) (model.StoreStatus, e
 	defer s.mu.RUnlock()
 
 	return model.StoreStatus{
-		Healthy:     true,
+		Healthy:      true,
 		RecordsCount: int64(len(s.observations)),
+		OutboxCounts: countOutboxStates(s.outbox),
 	}, nil
+}
+
+func countOutboxStates(events []model.OutboxEvent) map[model.DeliveryState]int64 {
+	counts := map[model.DeliveryState]int64{
+		model.StatePending:   0,
+		model.StateDelivered: 0,
+		model.StateExpired:   0,
+		model.StateEvicted:   0,
+		model.StateAmbiguous: 0,
+	}
+	for _, event := range events {
+		counts[event.DeliveryState]++
+	}
+	return counts
 }
 
 // Close releases resources.

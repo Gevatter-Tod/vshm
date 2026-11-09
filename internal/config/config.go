@@ -370,6 +370,11 @@ func GetSecretsPath() string {
 	return "/etc/vshm/secrets"
 }
 
+// GetStateDir returns the default state directory path.
+func GetStateDir() string {
+	return "/var/lib/vshm"
+}
+
 // EnsureSecretsDir creates the secrets directory with proper permissions.
 func EnsureSecretsDir(path string) error {
 	if err := os.MkdirAll(path, 0700); err != nil {

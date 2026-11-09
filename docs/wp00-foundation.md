@@ -21,7 +21,7 @@ type Store interface {
   EnqueueReport(context.Context, string, OutboxEvent) (bool, error)
   Pending(context.Context, time.Time, int) ([]OutboxEvent, error)
   MarkDelivery(context.Context, string, DeliveryOutcome, time.Time, time.Time, string) error
-  Prune(context.Context, time.Time, int64) (PruneResult, error)
+  Prune(context.Context, time.Time) (PruneResult, error)
   Status(context.Context, time.Time) (StoreStatus, error)
   Close() error
 }
@@ -29,15 +29,22 @@ type Transport interface { Validate(context.Context) (Compatibility, error); Sen
 type Notifier interface { Enqueue(context.Context, []OutboxEvent) error }
 type Reporter interface { Render(context.Context, Snapshot, time.Time) (OutboxEvent, error); Schedule(context.Context) error }
 type Registry interface { Register(string, Check) error; Get(string) (Check, bool); Types() []string }
+type PruneResult struct { Observations int64; OutboxRows int64 }
+type StoreStatus struct {
+  Healthy bool
+  LastError string
+  RecordsCount int64
+  OutboxCounts map[DeliveryState]int64
+}
 ```
-These are concrete proposed API signatures to freeze in WP-00; refine only in WP-00 before other packages code. Supporting proposed model types: `IncidentMutation`, `OutboxEvent`, `Snapshot`, `PruneResult`, `StoreStatus`, `Compatibility`, `DeliveryOutcome`; all must be defined in `internal/model` or owned WP-00 packages without secret serialization. The `Check` adapter receives validated immutable typed config and a single context deadline. `CheckResult` timestamps are UTC; `Reason` short/sanitized. Add `context` import as required. Signatures/API shape are **proposed — confirm with user**, as spec defines responsibilities but no Go signatures.
+These are the frozen WP-00 API signatures. Supporting types are defined in `internal/model` or owned WP-00 packages without secret serialization. The `Check` adapter receives validated immutable typed config and a single context deadline. `CheckResult` timestamps are UTC; `Reason` is short and sanitized. `PruneResult` reports separately removed observation and outbox row counts. `StoreStatus.OutboxCounts` reports a count for each outbox delivery state; discard counters are not part of the contract.
 
-WP-00 is the owner of these shared contracts; freeze them before dependent WPs implement.
+WP-00 is the owner of these shared contracts. `Prune` receives the current time; retention policy and pending-queue limits belong to `storage.Options`, not a per-call byte threshold. Storage also exports `ErrAlreadyRunning` when another process owns the state-directory lock.
 
 ## 4 Files to create/touch (exact paths in the required tree)
 
 ### Concrete WP-00 domain model contract
-Define types under `internal/model` (field names may be changed only before downstream freeze):
+These types are frozen under `internal/model`:
 ```go
 type CheckResult struct { CheckID string; CheckType string; Success bool; StartedAt time.Time; CompletedAt time.Time; Duration time.Duration; ReasonCode string; Reason string }
 type CheckConfig interface { CheckID() string; CheckType() string }
@@ -51,7 +58,7 @@ type Store interface {
  EnqueueReport(context.Context, string, OutboxEvent) (bool, error)
  Pending(context.Context, time.Time, int) ([]OutboxEvent, error)
  MarkDelivery(context.Context, string, DeliveryOutcome, time.Time, time.Time, string) error
- Prune(context.Context, time.Time, int64) (PruneResult, error)
+ Prune(context.Context, time.Time) (PruneResult, error)
  Status(context.Context, time.Time) (StoreStatus, error)
  Close() error
 }
@@ -60,7 +67,7 @@ type Notifier interface { Enqueue(context.Context, []OutboxEvent) error }
 type Reporter interface { Render(context.Context, Snapshot, time.Time) (OutboxEvent, error); Schedule(context.Context) error }
 type Registry interface { Register(string, Check) error; Get(string) (Check, bool); Types() []string }
 ```
-All methods use `context.Context` where IO/cancellation is possible. `Check.Run` must get a deadline-bearing context created once by scheduler. Models include observation UTC times/duration, incident state/mutation, immutable event ID/sequence/enqueue time, local report date key, delivery state, and sanitized reason. Never serialize credentials, SQL result values, HTTP bodies or crypto state. The above APIs and associated method semantics are concrete proposals since the specification does not prescribe Go signatures: **proposed — confirm with user before freezing**.
+All methods use `context.Context` where IO/cancellation is possible. `Check.Run` must get a deadline-bearing context created once by scheduler. Models include observation UTC times/duration, incident state/mutation, immutable event ID/sequence/enqueue time, local report date key, delivery state, and sanitized reason. Never serialize credentials, SQL result values, HTTP bodies or crypto state.
 
 ### SQLite schema and migrations (concrete proposed CREATE TABLE statements)
 Schema details were not fully prescribed by the source; all table names/columns below are **proposed — confirm with user**. Must support WAL, versioning, atomic writes and retention described in WP-02.
@@ -75,12 +82,23 @@ CREATE INDEX results_history_completed_idx ON results_history(completed_at_utc);
 CREATE TABLE outbox (enqueue_seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, host_name TEXT NOT NULL, event_kind TEXT NOT NULL, check_id TEXT, check_type TEXT, incident_id TEXT, local_report_date TEXT, enqueued_at_utc TEXT NOT NULL, next_attempt_at_utc TEXT NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0, delivery_state TEXT NOT NULL CHECK(delivery_state IN ('pending','delivered','expired','evicted','ambiguous')), last_outcome TEXT NOT NULL DEFAULT '', delivered_at_utc TEXT, expires_at_utc TEXT, payload_text TEXT NOT NULL);
 CREATE INDEX outbox_pending_order_idx ON outbox(delivery_state,next_attempt_at_utc,enqueue_seq);
 CREATE TABLE report_dates (local_date TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, created_at_utc TEXT NOT NULL);
-CREATE TABLE discard_counters (reason TEXT PRIMARY KEY, discarded_count INTEGER NOT NULL CHECK(discarded_count>=0), updated_at_utc TEXT NOT NULL);
 ```
-Migrations are ordered, transactional where SQLite allows, update `schema_version`, preserve existing state; no implicit reset. `payload_text` is preformatted sanitized text only. Review whether expiry timestamp should be derived from original enqueue timestamp/retention policy. Schema is deliberately a proposal, not a claim it appears in spec.
+Migrations are ordered, transactional where SQLite allows, update `schema_version`, preserve existing state; no implicit reset. `payload_text` is preformatted sanitized text only. Outbox state counts are exposed by `StoreStatus`; durable discard counters are not part of the storage contract.
+
+The storage package owns:
+```go
+var ErrAlreadyRunning error
+type Options struct {
+  ObservationRetention time.Duration
+  DeliveredRetention time.Duration
+  PendingMaxAge time.Duration
+  MaxPending int
+}
+```
+Defaults are 90 days, 30 days, 24 hours, and 1000 pending rows, respectively.
 
 ### Reason-code vocabulary (proposal — confirm)
-Suggested bounded enum: `systemd_inactive`, `systemd_unavailable`, `http_network`, `http_tls`, `http_status`, `http_assertion`, `http_body_too_large`, `ping_unavailable`, `ping_no_reply`, `mysql_connect`, `mysql_tls`, `mysql_query`, `mysql_no_rows`, `webdav_http_status`, `webdav_xml`, `webdav_propstat`, `timeout`, `internal_error`; discard reasons `age_expiry`, `low_space_eviction`; transport outcomes `confirmed_success`, `confirmed_failure`, `ambiguous`, `compatibility_blocked`. Strings/text must remain sanitized. These exact names are **proposed — confirm with user**.
+Suggested bounded enum: `systemd_inactive`, `systemd_unavailable`, `http_network`, `http_tls`, `http_status`, `http_assertion`, `http_body_too_large`, `ping_unavailable`, `ping_no_reply`, `mysql_connect`, `mysql_tls`, `mysql_query`, `mysql_no_rows`, `webdav_http_status`, `webdav_xml`, `webdav_propstat`, `timeout`, `internal_error`; transport outcomes `confirmed_success`, `confirmed_failure`, `ambiguous`, `compatibility_blocked`. Strings/text must remain sanitized. These exact names are **proposed — confirm with user**.
 
 ### Fakes
 Provide deterministic fake clock/timers; in-memory Store obeying atomicity, sequence, retention/status basics; fake Transport with confirmed failure/success/ambiguous and captured immutable events; fake Check/Registry. Tests must not need external services or credentials.

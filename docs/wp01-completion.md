@@ -29,7 +29,7 @@ WP-01 implementation is complete. The configuration package provides TOML schema
 
 #### [storage] Section (Optional)
 - `pending_max_age` - Default: 24h
-- `min_available_bytes` - Default: 104857600 (100MB), must be positive
+- `max_pending` - Default: 1000, must be positive
 
 #### [[checks]] List (May Be Empty)
 - `check_id` - Required, format: `[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}`, unique

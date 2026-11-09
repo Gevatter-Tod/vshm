@@ -9,14 +9,14 @@ import (
 
 // CheckResult represents the result of a single check execution.
 type CheckResult struct {
-	CheckID    string
-	CheckType  string
-	Success    bool
-	StartedAt  time.Time
+	CheckID     string
+	CheckType   string
+	Success     bool
+	StartedAt   time.Time
 	CompletedAt time.Time
-	Duration   time.Duration
-	ReasonCode string
-	Reason     string
+	Duration    time.Duration
+	ReasonCode  string
+	Reason      string
 }
 
 // CheckConfig is the validated configuration for a check.
@@ -61,7 +61,7 @@ type Store interface {
 	// MarkDelivery updates delivery status.
 	MarkDelivery(ctx context.Context, eventID string, outcome DeliveryOutcome, deliveredAt, enqueuedAt time.Time, reason string) error
 	// Prune removes old records.
-	Prune(ctx context.Context, cutoff time.Time, maxAge int64) (PruneResult, error)
+	Prune(ctx context.Context, now time.Time) (PruneResult, error)
 	// Status returns storage health.
 	Status(ctx context.Context, now time.Time) (StoreStatus, error)
 	// Close releases resources.
@@ -96,13 +96,13 @@ type Registry interface {
 
 // IncidentMutation describes an incident state change.
 type IncidentMutation struct {
-	HostName     string
-	CheckID      string
-	Open         bool
-	LastFailure  time.Time
-	ReasonCode   string
-	Reason       string
-	ResolvedAt   *time.Time
+	HostName    string
+	CheckID     string
+	Open        bool
+	LastFailure time.Time
+	ReasonCode  string
+	Reason      string
+	ResolvedAt  *time.Time
 }
 
 // OutboxEvent represents a queued message.
@@ -127,71 +127,76 @@ type OutboxEvent struct {
 
 // Snapshot represents system state at a point in time.
 type Snapshot struct {
-	HostName      string
-	Time          time.Time
-	Checks        []CheckStatus
-	Incidents     []IncidentSummary
-	LastReport    time.Time
-	DiscardCounts map[string]int64
+	HostName   string
+	Time       time.Time
+	Checks     []CheckStatus
+	Incidents  []IncidentSummary
+	LastReport time.Time
 }
 
 // CheckStatus is the current status of a check.
 type CheckStatus struct {
-	CheckID      string
-	CheckType    string
-	LastStatus   string
-	LastStarted  time.Time
+	CheckID       string
+	CheckType     string
+	LastStatus    string
+	LastStarted   time.Time
 	LastCompleted time.Time
-	LastDuration time.Duration
-	ReasonCode   string
-	Reason       string
+	LastDuration  time.Duration
+	ReasonCode    string
+	Reason        string
+	Successes24h  int64
+	Failures24h   int64
 }
 
 // IncidentSummary is a summary of an incident.
 type IncidentSummary struct {
-	IncidentID   string
-	HostName     string
-	CheckID      string
-	OpenedAt     time.Time
-	LastFailure  time.Time
-	ReasonCode   string
-	Reason       string
-	ResolvedAt   *time.Time
+	IncidentID  string
+	HostName    string
+	CheckID     string
+	OpenedAt    time.Time
+	LastFailure time.Time
+	ReasonCode  string
+	Reason      string
+	ResolvedAt  *time.Time
 }
 
 // DeliveryOutcome represents the result of a delivery attempt.
 type DeliveryOutcome string
 
 const (
-	DeliverySuccess    DeliveryOutcome = "success"
-	DeliveryFailure    DeliveryOutcome = "failure"
-	DeliveryAmbiguous  DeliveryOutcome = "ambiguous"
-	DeliveryExpired    DeliveryOutcome = "expired"
-	DeliveryEvicted    DeliveryOutcome = "evicted"
+	DeliverySuccess   DeliveryOutcome = "success"
+	DeliveryFailure   DeliveryOutcome = "failure"
+	DeliveryAmbiguous DeliveryOutcome = "ambiguous"
+	DeliveryExpired   DeliveryOutcome = "expired"
+	DeliveryEvicted   DeliveryOutcome = "evicted"
 )
 
 // DeliveryState is the current state of an outbox event.
 type DeliveryState string
 
 const (
-	StatePending    DeliveryState = "pending"
-	StateDelivered  DeliveryState = "delivered"
-	StateExpired    DeliveryState = "expired"
-	StateEvicted    DeliveryState = "evicted"
-	StateAmbiguous  DeliveryState = "ambiguous"
+	StatePending   DeliveryState = "pending"
+	StateDelivered DeliveryState = "delivered"
+	StateExpired   DeliveryState = "expired"
+	StateEvicted   DeliveryState = "evicted"
+	StateAmbiguous DeliveryState = "ambiguous"
 )
 
 // PruneResult describes pruning operation results.
 type PruneResult struct {
-	RecordsRemoved int64
-	Duration       time.Duration
+	Observations int64
+	OutboxRows   int64
 }
 
 // StoreStatus describes storage health.
 type StoreStatus struct {
-	Healthy     bool
-	LastError   string
-	RecordsCount int64
+	Healthy       bool
+	LastError     string
+	RecordsCount  int64
+	OutboxCounts  map[DeliveryState]int64
+	DBSizeBytes   int64
+	SchemaVersion string
+	LockPath      string
 }
 
 // Compatibility describes transport compatibility.

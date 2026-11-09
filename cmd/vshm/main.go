@@ -45,6 +45,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "validate-config: %v\n", err)
 			os.Exit(1)
 		}
+	case "status":
+		stateDir := ""
+		if len(args) >= 2 {
+			stateDir = args[1]
+		}
+		if err := cli.Status(ctx, stateDir); err != nil {
+			fmt.Fprintf(os.Stderr, "status: %v\n", err)
+			os.Exit(1)
+		}
 	case "once":
 		configPath := ""
 		if len(args) >= 2 {
@@ -54,9 +63,21 @@ func main() {
 			fmt.Fprintf(os.Stderr, "once: %v\n", err)
 			os.Exit(1)
 		}
+	case "run":
+		configPath, stateDir := "", ""
+		if len(args) >= 2 {
+			configPath = args[1]
+		}
+		if len(args) >= 3 {
+			stateDir = args[2]
+		}
+		if err := cli.RunAgent(ctx, configPath, stateDir); err != nil {
+			fmt.Fprintf(os.Stderr, "run: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
-		fmt.Fprintf(os.Stderr, "Available commands: version, validate-config, once\n")
+		fmt.Fprintf(os.Stderr, "Available commands: version, validate-config, status, once, run\n")
 		os.Exit(1)
 	}
 }

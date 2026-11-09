@@ -21,7 +21,7 @@ type Store interface {
   EnqueueReport(context.Context, string, OutboxEvent) (bool, error)
   Pending(context.Context, time.Time, int) ([]OutboxEvent, error)
   MarkDelivery(context.Context, string, DeliveryOutcome, time.Time, time.Time, string) error
-  Prune(context.Context, time.Time, int64) (PruneResult, error)
+  Prune(context.Context, time.Time) (PruneResult, error)
   Status(context.Context, time.Time) (StoreStatus, error)
   Close() error
 }
