@@ -8,8 +8,15 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Gevatter-Tod/vshm/internal/checks/http"
+	"github.com/Gevatter-Tod/vshm/internal/checks/mysql"
+	"github.com/Gevatter-Tod/vshm/internal/checks/ping"
+	"github.com/Gevatter-Tod/vshm/internal/checks/systemd"
+	"github.com/Gevatter-Tod/vshm/internal/checks/webdav"
 	"github.com/Gevatter-Tod/vshm/internal/config"
+	"github.com/Gevatter-Tod/vshm/internal/logging"
 	"github.com/Gevatter-Tod/vshm/internal/model"
+	"github.com/Gevatter-Tod/vshm/internal/scheduler"
 	"github.com/Gevatter-Tod/vshm/internal/storage"
 )
 
@@ -51,7 +58,42 @@ func ValidateConfig(ctx context.Context, configPath string) error {
 	return nil
 }
 
-// RunOnce executes a single check.
+// logObserver prints observations until the incident service (WP-10) is wired in.
+type logObserver struct{ logger *logging.Logger }
+
+func (o logObserver) Observe(_ context.Context, r model.CheckResult) error {
+	status := "FAIL"
+	if r.Success {
+		status = "OK"
+	}
+	o.logger.Printf("observation check=%s type=%s status=%s code=%s duration=%v reason=%q",
+		r.CheckID, r.CheckType, status, r.ReasonCode, r.Duration, logging.Sanitize(r.Reason))
+	return nil
+}
+
+// newScheduler resolves the configured checks into a scheduler.
+func newScheduler(cfg *config.Config, logger *logging.Logger, pruner scheduler.Pruner) (*scheduler.Scheduler, error) {
+	reg := scheduler.NewRegistry()
+	for _, c := range []model.Check{
+		systemd.New(logger), http.New(logger), ping.New(logger), mysql.New(logger), webdav.New(logger),
+	} {
+		if err := reg.Register(c.Type(), c); err != nil {
+			return nil, err
+		}
+	}
+	entries, err := scheduler.EntriesFromConfig(cfg, reg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve checks: %w", err)
+	}
+	return scheduler.New(scheduler.Options{
+		Clock:    storage.RealClock{},
+		Observer: logObserver{logger: logger},
+		Pruner:   pruner,
+		Logger:   logger,
+	}, entries)
+}
+
+// RunOnce executes every configured check once on the scheduler worker pool.
 func RunOnce(ctx context.Context, configPath string) error {
 	if configPath == "" {
 		configPath = config.GetConfigPath()
@@ -71,7 +113,12 @@ func RunOnce(ctx context.Context, configPath string) error {
 	fmt.Printf("Running once with config at %s\n", configPath)
 	fmt.Printf("Host: %s\n", cfg.Agent.HostName)
 	fmt.Printf("Checks: %d\n", len(cfg.Checks))
-	return nil
+
+	sched, err := newScheduler(cfg, logging.New("vshm: "), nil)
+	if err != nil {
+		return err
+	}
+	return sched.Once(ctx)
 }
 
 // DBFileName is the SQLite database file name inside the state directory.
@@ -120,7 +167,8 @@ func Status(ctx context.Context, stateDir string) error {
 }
 
 // RunAgent validates the configuration, takes the state-directory lock and runs
-// until ctx is cancelled. Scheduling is added by WP-03.
+// until ctx is cancelled. A cleanup failure in the scheduler is returned as an
+// error so the process exits nonzero and systemd restarts it.
 func RunAgent(ctx context.Context, configPath, stateDir string) error {
 	if configPath == "" {
 		configPath = config.GetConfigPath()
@@ -139,9 +187,12 @@ func RunAgent(ctx context.Context, configPath, stateDir string) error {
 	}
 	defer store.Close()
 
+	sched, err := newScheduler(cfg, logging.New("vshm: "), store)
+	if err != nil {
+		return err
+	}
 	fmt.Printf("vshm running for host %s\n", cfg.Agent.HostName)
-	<-ctx.Done()
-	return nil
+	return sched.Run(ctx)
 }
 
 // Version returns the version.

@@ -15,6 +15,10 @@ WP‑00 (foundation) is complete: project skeleton, frozen shared contracts
 (`internal/model/fake`), minimal CLI. Monitoring itself (checks, scheduler,
 incidents, reports, outbox, transport) is delivered by WP‑01…WP‑13.
 
+WP‑03 (scheduler) is complete: `internal/scheduler` runs checks on four fixed
+workers with monotonic cadence, one absolute deadline per execution, a 2 s
+cleanup grace and hourly pruning (see `docs/wp03-completion.md`).
+
 ## Toolchain (fixed)
 
 - Go **1.27.4**, `CGO_ENABLED=0`, Linux amd64 only.

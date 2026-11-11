@@ -5,7 +5,7 @@ vshm is a single-binary host monitoring agent that runs under systemd. It consis
 - **CLI** (`cmd/vshm/main.go`): Entry point with subcommands for validation, running, and status.
 - **Config** (`internal/config`): TOML configuration with validation and secrets handling.
 - **Storage** (`internal/storage`): SQLite-backed persistence with process locking, schema management, and time-based pruning.
-- **Scheduler** (`internal/scheduler`): Monotonic cadence with four concurrent workers, non-overlapping checks, and deadline enforcement.
+- **Scheduler** (`internal/scheduler`): Monotonic cadence with four concurrent workers, non-overlapping checks, and deadline enforcement. Adapters own cleanup of their connections/process groups on context cancellation; if cleanup exceeds the 2 s grace the scheduler reports `ErrCleanupTimeout` and the agent exits nonzero. See `docs/wp03-completion.md`.
 - **Check Adapters** (`internal/checks`): Read-only check implementations (systemd, HTTP, ping, MySQL, WebDAV).
 - **Incidents** (`internal/incidents`): Threshold-based incident detection and state transitions.
 - **Reports** (`internal/reports`): Daily report generation with DST-aware scheduling.
