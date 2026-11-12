@@ -15,11 +15,11 @@ import (
 
 // AgentConfig represents the [agent] section configuration.
 type AgentConfig struct {
-	HostName     string        `toml:"host_name"`  // Required: explicit stable identity
-	Interval     time.Duration `toml:"interval"`   // Default: 30m
-	Timeout      time.Duration `toml:"timeout"`    // Default: 10s
-	ReportTime   string        `toml:"report_time"` // Default: 09:00 (HH:MM format)
-	RoomID       string        `toml:"room_id"`
+	HostName   string        `toml:"host_name"`   // Required: explicit stable identity
+	Interval   time.Duration `toml:"interval"`    // Default: 30m
+	Timeout    time.Duration `toml:"timeout"`     // Default: 10s
+	ReportTime string        `toml:"report_time"` // Default: 09:00 (HH:MM format)
+	RoomID     string        `toml:"room_id"`
 }
 
 // MetricsConfig represents the [metrics] section configuration.
@@ -29,17 +29,24 @@ type MetricsConfig struct {
 
 // StorageConfig represents the [storage] section configuration.
 type StorageConfig struct {
-	PendingMaxAge       time.Duration `toml:"pending_max_age"`       // Default: 24h
-	MinAvailableBytes   int64         `toml:"min_available_bytes"`   // Default: 104857600
+	PendingMaxAge     time.Duration `toml:"pending_max_age"`     // Default: 24h
+	MinAvailableBytes int64         `toml:"min_available_bytes"` // Default: 104857600
 }
 
 // CheckConfig represents a single check configuration.
 type CheckConfig struct {
-	Type       string   `toml:"type"`
-	CheckID    string   `toml:"check_id"`
-	Interval   string   `toml:"interval,omitempty"`
-	Timeout    string   `toml:"timeout,omitempty"`
-	SecretFile string   `toml:"secret_file,omitempty"`
+	Type       string `toml:"type"`
+	CheckID    string `toml:"check_id"`
+	Interval   string `toml:"interval,omitempty"`
+	Timeout    string `toml:"timeout,omitempty"`
+	SecretFile string `toml:"secret_file,omitempty"`
+	// HTTP-specific fields
+	URL            string `toml:"url,omitempty"`
+	ExpectedStatus int    `toml:"expected_status,omitempty"`
+	BodyContains   string `toml:"body_contains,omitempty"`
+	CredentialFile string `toml:"credential_file,omitempty"`
+	// Ping-specific fields
+	Host string `toml:"host,omitempty"`
 }
 
 // CheckType represents the type of check.
@@ -66,10 +73,10 @@ func ValidCheckTypes() []CheckType {
 
 // Config is the main configuration structure.
 type Config struct {
-	Agent     AgentConfig     `toml:"agent"`
-	Metrics   MetricsConfig   `toml:"metrics"`
-	Storage   StorageConfig   `toml:"storage"`
-	Checks    []CheckConfig   `toml:"checks"`
+	Agent       AgentConfig     `toml:"agent"`
+	Metrics     MetricsConfig   `toml:"metrics"`
+	Storage     StorageConfig   `toml:"storage"`
+	Checks      []CheckConfig   `toml:"checks"`
 	unknownKeys map[string]bool `toml:"-"` // Tracks unknown keys for validation
 }
 
@@ -97,10 +104,10 @@ func Load(path string) (*Config, error) {
 func detectUnknownKeys(data []byte, cfg *Config) error {
 	// Create a temporary struct with all known keys
 	type KnownConfig struct {
-		Agent     AgentConfig     `toml:"agent"`
-		Metrics   MetricsConfig   `toml:"metrics"`
-		Storage   StorageConfig   `toml:"storage"`
-		Checks    []CheckConfig   `toml:"checks"`
+		Agent   AgentConfig   `toml:"agent"`
+		Metrics MetricsConfig `toml:"metrics"`
+		Storage StorageConfig `toml:"storage"`
+		Checks  []CheckConfig `toml:"checks"`
 	}
 
 	var known KnownConfig
@@ -289,6 +296,27 @@ func validateChecks(checks []CheckConfig) error {
 		if check.SecretFile != "" {
 			if err := validateSecretFile(check.SecretFile); err != nil {
 				errs = append(errs, fmt.Errorf("checks[%d]: %w", i, err))
+			}
+		}
+
+		// Validate HTTP-specific fields
+		if check.Type == "http" {
+			if check.URL == "" {
+				errs = append(errs, fmt.Errorf("checks[%d]: url is required for http checks", i))
+			}
+			if check.ExpectedStatus > 0 && (check.ExpectedStatus < 100 || check.ExpectedStatus > 599) {
+				errs = append(errs, fmt.Errorf("checks[%d]: expected_status must be between 100 and 599", i))
+			}
+			if check.CredentialFile != "" {
+				if err := validateSecretFile(check.CredentialFile); err != nil {
+					errs = append(errs, fmt.Errorf("checks[%d]: %w", i, err))
+				}
+			}
+		}
+
+		if check.Type == "ping" {
+			if check.Host == "" {
+				errs = append(errs, fmt.Errorf("checks[%d]: host is required for ping checks", i))
 			}
 		}
 	}

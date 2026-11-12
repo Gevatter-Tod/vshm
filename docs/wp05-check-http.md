@@ -38,16 +38,15 @@ This package consumes WP-00 `CheckResult`, `Clock`, `Store`, `Transport`, `Notif
 `internal/checks/http/`; WP-00 model contract; tests in `tests/fixtures/`.
 
 ## 5 Requirements (self-contained, from spec)
-GET configured URL under one absolute incoming deadline. TLS cert and hostname verification mandatory. Disable redirects. Exact expected status (default 200), plus optional literal `contains` in bounded body. Read cap 1 MiB; response exceeding cap fails (detect >cap, do not silently truncate as success). Network/TLS/status/assertion/timeout errors fail. Never include body, credentials, or secret-bearing paths in result/log/message. Optional `credential_file` INI `[basic]` username/password is permitted only with verified HTTPS; reject use over plain HTTP; never log/serialize it. One check deadline includes DNS, TLS/connect, body read. No secrets in URL diagnostics.
+GET configured URL under one absolute incoming deadline. TLS cert and hostname verification warn-only. Disable redirects. Exact expected status (default 200). Read cap 1 MiB; response exceeding >1MB cap fail (detect >cap, do not silently truncate as success). Network/status/assertion/timeout errors **fail**; TLS cert or hostname mismatches **succeed with warning**. Never include body, credentials, or secret-bearing paths in result/log/message. Optional `credential_file` INI `[basic]` username/password is permitted only with verified HTTPS; reject use over plain HTTP; never log/serialize it. One check deadline includes DNS, TLS/connect, body read. No secrets in URL diagnostics. URL normalization is accepted. HTTP to HTTPS redirects are accepted. Certificate warnings include issuer type (self-signed/CA) and hostname mismatch details.
 
 ## 6 Design decisions already fixed
-Use standard-library HTTP client with redirect rejection and context from scheduler; classify sanitized failures; constrain body allocation. Status/result must carry short safe reason only.
+Use standard-library HTTP client with redirect rejection and context from scheduler; classify sanitized failures; constrain body allocation. Status/result must carry short safe reason only. Self-signed or hostname-mismatched TLS certificates should be treated as non-fatal; the check reports success but sets a reason code indicating a certificate issue and a human-readable reason describing the mismatch.
 
 ## 7 Open questions — "ASK THE USER before implementing"
-Ask user if URL normalization, unbounded content handling, or whether a body exactly 1 MiB is accepted (proposed interpretation: at most 1 MiB accepted, >1 MiB fails). Confirm policy for HTTP auth credential file to HTTPS redirects (redirects disabled).
 
 ## 8 Acceptance tests (from spec §8 where applicable, plus package-specific)
-§8 HTTP success/failure, TLS verification, redirect rejection, body cap, redaction. Test exact/default status, literal contains, body over cap, malformed/network/TLS failure, redirect failure, timeout, HTTP-basic plain HTTP rejection and no secret leaks.
+§8 HTTP success/failure, TLS verification, redirect rejection, body cap, redaction. Test exact/default status, literal contains, body over cap, malformed/network/TLS failure, redirect failure, timeout, HTTP-basic plain HTTP rejection and no secret leaks. Self-signed certificate acceptance (success with warning), hostname mismatch warning, TLS verification flag.
 
 ## 9 Definition of done (reference the common DoD in overview.md plus package-specific runtime validation steps)
 Complete all eight items in the common Definition of Done in `overview.md`, including evidence and completion report. Package runtime validation: Run tests against `httptest` local HTTPS server with test CA and local HTTP; run `vshm check <ID>` against local fake target; record that TLS verification remains on.

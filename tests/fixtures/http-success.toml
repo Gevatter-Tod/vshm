@@ -1,0 +1,12 @@
+[agent]
+host_name = "test-host"
+interval = "1m"
+timeout = "10s"
+report_time = "09:00"
+
+[checks]
+[[checks]]
+type = "http"
+check_id = "http-success"
+url = "https://example.com/health"
+expected_status = 200

@@ -18,13 +18,42 @@ const (
 	MaxTimeout      = 300 * time.Second
 )
 
-// spec is the immutable model.CheckConfig handed to adapters by EntriesFromConfig.
-type spec struct {
-	id, typ string
+// Spec is the immutable model.CheckConfig handed to adapters by EntriesFromConfig.
+type Spec struct {
+	ID             string
+	Typ            string
+	URL            string
+	ExpectedStatus int
+	BodyContains   string
+	CredentialFile string
+	Timeout        time.Duration
+	// Ping-specific fields
+	Target string
 }
 
-func (s spec) CheckID() string   { return s.id }
-func (s spec) CheckType() string { return s.typ }
+// CheckID returns the check ID.
+func (s *Spec) CheckID() string {
+	if s == nil {
+		return ""
+	}
+	return s.ID
+}
+
+// CheckType returns the check type.
+func (s *Spec) CheckType() string {
+	if s == nil {
+		return ""
+	}
+	return s.Typ
+}
+
+// pingHost returns the ping target host, or empty string if not a ping check.
+func (s *Spec) PingHost() string {
+	if s == nil {
+		return ""
+	}
+	return s.Target
+}
 
 // EntriesFromConfig resolves every configured check into a schedulable Entry:
 // the agent-level interval/timeout apply unless the check overrides them, and the
@@ -66,9 +95,30 @@ func EntriesFromConfig(cfg *config.Config, reg model.Registry) ([]Entry, error) 
 		if !ok {
 			return nil, fmt.Errorf("checks[%d] %q: no adapter registered for type %q", i, c.CheckID, c.Type)
 		}
+
+		// Pass check-specific fields to spec
+		var httpFields struct {
+			url            string
+			expectedStatus int
+			bodyContains   string
+			credentialFile string
+		}
+		var pingFields struct {
+			host string
+		}
+		if c.Type == "http" {
+			httpFields.url = c.URL
+			httpFields.expectedStatus = c.ExpectedStatus
+			httpFields.bodyContains = c.BodyContains
+			httpFields.credentialFile = c.CredentialFile
+		}
+		if c.Type == "ping" {
+			pingFields.host = c.Host
+		}
+
 		entries = append(entries, Entry{
 			Check:    adapter,
-			Config:   spec{id: c.CheckID, typ: c.Type},
+			Config:   &Spec{ID: c.CheckID, Typ: c.Type, URL: httpFields.url, ExpectedStatus: httpFields.expectedStatus, BodyContains: httpFields.bodyContains, CredentialFile: httpFields.credentialFile, Target: pingFields.host},
 			Interval: iv,
 			Timeout:  to,
 		})

@@ -1,0 +1,16 @@
+[agent]
+  host_name = "test-ping-host"
+  interval = "5m"
+  timeout = "10s"
+  report_time = "09:00"
+  room_id = "!testroom:example.com"
+
+[[checks]]
+  check_id = "ping-loopback"
+  type = "ping"
+  host = "127.0.0.1"
+  interval = "1m"
+  timeout = "5s"
+
+log_level = "info"
+state_dir = "/tmp/vshm-test"
