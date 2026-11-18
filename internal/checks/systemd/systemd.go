@@ -154,7 +154,7 @@ func (b *realBackend) IsActive(ctx context.Context, unit string, timeout time.Du
 		if ctx.Err() == context.DeadlineExceeded {
 			return false, "", fmt.Errorf("deadline exceeded")
 		}
-		return false, "", fmt.Errorf("query failed: %w", err)
+		return false, "", err
 	}
 
 	status := strings.TrimSpace(string(output))

@@ -46,24 +46,24 @@ pending_max_age = "24h"
 min_available_bytes = 104857600
 
 [[checks]]
-id = "nginx"
+check_id = "nginx"
 type = "systemd"
-unit = "nginx.service"
+target = "nginx.service"
 
 [[checks]]
-id = "site-health"
+check_id = "site-health"
 type = "http"
 url = "https://example.org/health"
 expected_status = 200
 contains = "ok"
 
 [[checks]]
-id = "gateway-ping"
+check_id = "gateway-ping"
 type = "ping"
 host = "192.0.2.1"
 
 [[checks]]
-id = "db-readiness"
+check_id = "db-readiness"
 type = "mysql"
 host = "db.example.org"
 port = 3306
@@ -73,7 +73,7 @@ tls_ca = "/etc/ssl/certs/ca-certificates.crt"
 query = "SELECT 1"
 
 [[checks]]
-id = "dav-list"
+check_id = "dav-list"
 type = "webdav"
 url = "https://dav.example.org/shared/"
 depth = 1

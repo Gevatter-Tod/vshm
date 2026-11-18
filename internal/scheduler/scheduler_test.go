@@ -674,8 +674,8 @@ func TestEntriesFromConfig(t *testing.T) {
 	}
 
 	c := &config.Config{Checks: []config.CheckConfig{
-		{Type: "systemd", CheckID: "default"},
-		{Type: "http", CheckID: "override", Interval: "2m", Timeout: "20s"},
+		{Type: "systemd", CheckID: "default", Target: "multi-user.target"},
+		{Type: "http", CheckID: "override", Interval: "2m", Timeout: "20s", URL: "https://example.org/", BodyContains: "ok"},
 		{Type: "http", CheckID: "global-override"},
 	}}
 	// Agent defaults unset -> 30m / 10s.
@@ -685,6 +685,12 @@ func TestEntriesFromConfig(t *testing.T) {
 	}
 	if got[0].Interval != 30*time.Minute || got[0].Timeout != 10*time.Second {
 		t.Fatalf("defaults: %v %v", got[0].Interval, got[0].Timeout)
+	}
+	if sp, ok := got[0].Config.(*Spec); !ok || sp.Target != "multi-user.target" {
+		t.Fatalf("systemd target not wired into spec: %+v", got[0].Config)
+	}
+	if sp, ok := got[1].Config.(*Spec); !ok || sp.URL != "https://example.org/" || sp.BodyContains != "ok" || sp.ExpectedStatus != 0 {
+		t.Fatalf("http fields not wired into spec: %+v", got[1].Config)
 	}
 	if got[1].Interval != 2*time.Minute || got[1].Timeout != 20*time.Second {
 		t.Fatalf("override: %v %v", got[1].Interval, got[1].Timeout)

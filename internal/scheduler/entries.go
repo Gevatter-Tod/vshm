@@ -103,9 +103,7 @@ func EntriesFromConfig(cfg *config.Config, reg model.Registry) ([]Entry, error) 
 			bodyContains   string
 			credentialFile string
 		}
-		var pingFields struct {
-			host string
-		}
+		target := ""
 		if c.Type == "http" {
 			httpFields.url = c.URL
 			httpFields.expectedStatus = c.ExpectedStatus
@@ -113,12 +111,15 @@ func EntriesFromConfig(cfg *config.Config, reg model.Registry) ([]Entry, error) 
 			httpFields.credentialFile = c.CredentialFile
 		}
 		if c.Type == "ping" {
-			pingFields.host = c.Host
+			target = c.Host
+		}
+		if c.Type == "systemd" {
+			target = c.Target
 		}
 
 		entries = append(entries, Entry{
 			Check:    adapter,
-			Config:   &Spec{ID: c.CheckID, Typ: c.Type, URL: httpFields.url, ExpectedStatus: httpFields.expectedStatus, BodyContains: httpFields.bodyContains, CredentialFile: httpFields.credentialFile, Target: pingFields.host},
+			Config:   &Spec{ID: c.CheckID, Typ: c.Type, URL: httpFields.url, ExpectedStatus: httpFields.expectedStatus, BodyContains: httpFields.bodyContains, CredentialFile: httpFields.credentialFile, Target: target},
 			Interval: iv,
 			Timeout:  to,
 		})

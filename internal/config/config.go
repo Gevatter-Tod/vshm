@@ -43,10 +43,12 @@ type CheckConfig struct {
 	// HTTP-specific fields
 	URL            string `toml:"url,omitempty"`
 	ExpectedStatus int    `toml:"expected_status,omitempty"`
-	BodyContains   string `toml:"body_contains,omitempty"`
+	BodyContains   string `toml:"contains,omitempty"`
 	CredentialFile string `toml:"credential_file,omitempty"`
 	// Ping-specific fields
 	Host string `toml:"host,omitempty"`
+	// Systemd-specific fields
+	Target string `toml:"target,omitempty"`
 }
 
 // CheckType represents the type of check.
@@ -317,6 +319,13 @@ func validateChecks(checks []CheckConfig) error {
 		if check.Type == "ping" {
 			if check.Host == "" {
 				errs = append(errs, fmt.Errorf("checks[%d]: host is required for ping checks", i))
+			}
+		}
+
+		// Validate systemd-specific fields
+		if check.Type == "systemd" {
+			if check.Target == "" {
+				errs = append(errs, fmt.Errorf("checks[%d]: target is required for systemd checks", i))
 			}
 		}
 	}

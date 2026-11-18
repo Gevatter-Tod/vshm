@@ -36,7 +36,7 @@ type Config struct {
 	Timeout          time.Duration `toml:"timeout"`
 	SecretFile       string        `toml:"secret_file,omitempty"`
 	ExpectedStatus   int           `toml:"expected_status,omitempty"`
-	BodyContains     string        `toml:"body_contains,omitempty"`
+	BodyContains     string        `toml:"contains,omitempty"`
 	CredentialFile   string        `toml:"credential_file,omitempty"`
 }
 

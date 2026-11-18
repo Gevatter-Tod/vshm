@@ -83,7 +83,7 @@ Implemented HTTP(S) GET health-check adapter according to `wp05-check-http.md` s
 | `url` | Yes | - | HTTP/HTTPS endpoint URL |
 | `timeout` | No | 10s | Request timeout |
 | `expected_status` | No | 200 | Expected HTTP status code |
-| `body_contains` | No | - | Literal string to check in response |
+| `contains` | No | - | Literal string to check in response |
 | `credential_file` | No | - | Path to INI credentials file |
 | `interval` | No | 30m | Check interval |
 

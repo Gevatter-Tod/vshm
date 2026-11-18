@@ -12,8 +12,8 @@
   # timeout: check timeout (default: 10s, range: 1s-300s, must be < interval)
   timeout = "10s"
   
-  # report_time: daily report time (default: 09:00, uses server-local time)
-  report_time = "2006-01-02T09:00:00Z"
+  # report_time: daily report time, HH:MM 24h format, server-local time (default: 09:00)
+  report_time = "09:00"
   
   # room_id: Matrix room ID for notifications
   room_id = "!roomid:matrix.org"
@@ -131,8 +131,5 @@
   interval = "5m"
   timeout = "10s"
 
-# Logging level: debug, info, warn, error
-log_level = "info"
-
-# State directory
-state_dir = "/var/lib/vshm"
+# Note: there are no top-level log_level/state_dir keys; the state directory is
+# fixed at /var/lib/vshm (created by the systemd unit's StateDirectory=vshm).

@@ -23,24 +23,26 @@ sudo chmod 755 /usr/bin/vshm
 ### Example Configuration
 
 ```toml
-[checks]
-  [[checks.systemd]]
-    check_id = "systemd-check"
-    target = "multi-user.target"
-    interval = "5m"
-    timeout = "30s"
-  
-  [[checks.http]]
-    check_id = "http-check"
-    url = "https://example.com/health"
-    interval = "1m"
-    timeout = "10s"
-  
-  [[checks.ping]]
-    check_id = "ping-check"
-    host = "192.168.1.1"
-    interval = "5m"
-    timeout = "10s"
+[[checks]]
+  check_id = "systemd-check"
+  type = "systemd"
+  target = "multi-user.target"
+  interval = "5m"
+  timeout = "30s"
+
+[[checks]]
+  check_id = "http-check"
+  type = "http"
+  url = "https://example.com/health"
+  interval = "1m"
+  timeout = "10s"
+
+[[checks]]
+  check_id = "ping-check"
+  type = "ping"
+  host = "192.168.1.1"
+  interval = "5m"
+  timeout = "10s"
 ```
 
 ### Configuration Location
