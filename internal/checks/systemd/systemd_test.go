@@ -40,34 +40,34 @@ func TestNewSystemdConfig(t *testing.T) {
 // TestCheckRun tests the Run method with various scenarios.
 func TestCheckRun(t *testing.T) {
 	tests := []struct {
-		name           string
-		activeState    string
+		name            string
+		activeState     string
 		expectedSuccess bool
-		expectedReason string
+		expectedReason  string
 	}{
 		{
-			name:           "active state",
-			activeState:    "active",
+			name:            "active state",
+			activeState:     "active",
 			expectedSuccess: true,
-			expectedReason: `unit "my-service.service" is active`,
+			expectedReason:  `unit "my-service.service" is active`,
 		},
 		{
-			name:           "inactive state",
-			activeState:    "inactive",
+			name:            "inactive state",
+			activeState:     "inactive",
 			expectedSuccess: false,
-			expectedReason: `unit "my-service.service" is "inactive"`,
+			expectedReason:  `unit "my-service.service" is "inactive"`,
 		},
 		{
-			name:           "failed state",
-			activeState:    "failed",
+			name:            "failed state",
+			activeState:     "failed",
 			expectedSuccess: false,
-			expectedReason: `unit "my-service.service" is "failed"`,
+			expectedReason:  `unit "my-service.service" is "failed"`,
 		},
 		{
-			name:           "unknown state",
-			activeState:    "unknown",
+			name:            "unknown state",
+			activeState:     "unknown",
 			expectedSuccess: false,
-			expectedReason: `unit "my-service.service" is "unknown"`,
+			expectedReason:  `unit "my-service.service" is "unknown"`,
 		},
 	}
 

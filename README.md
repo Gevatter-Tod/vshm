@@ -19,6 +19,16 @@ WP‑03 (scheduler) is complete: `internal/scheduler` runs checks on four fixed
 workers with monotonic cadence, one absolute deadline per execution, a 2 s
 cleanup grace and hourly pruning (see `docs/wp03-completion.md`).
 
+WP‑09 (metrics) is complete: `internal/metrics` collects report‑only Linux
+resource metrics (see `docs/wp09-completion.md`). Metrics are sampled when a
+daily report is rendered and never open incidents or alerts. Decisions
+confirmed with the user: mount stats use the pure‑Go stdlib `syscall.Statfs`
+(CGO‑free, no extra dependency); an omitted/empty `[metrics].mounts` defaults
+to `["/"]`; the snapshot carries load1/5/15 from `/proc/loadavg`; rendered
+values use explicit units (MiB for bytes, seconds for uptime, two decimals for
+load) and unavailable sources/mounts render as `UNAVAILABLE(<reason>)`, never
+zero or a guessed value.
+
 ## Toolchain (fixed)
 
 - Go **1.27.4**, `CGO_ENABLED=0`, Linux amd64 only.

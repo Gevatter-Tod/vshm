@@ -57,54 +57,55 @@ func (c *Check) Type() string {
 func (c *Check) Run(ctx context.Context, cfg model.CheckConfig) model.CheckResult {
 	startedAt := time.Now().UTC()
 
-	// Parse check-specific config from CheckConfig
-	checkConfig, ok := cfg.(*scheduler.Spec)
-	if !ok {
-		return model.CheckResult{
-			CheckID:    cfg.CheckID(),
-			CheckType:  cfg.CheckType(),
-			Success:    false,
-			StartedAt:  startedAt,
-			CompletedAt: time.Now().UTC(),
-			Duration:   time.Since(startedAt),
-			ReasonCode: "invalid_config",
-			Reason:     "check config is not spec",
+	// Parse check-specific config from CheckConfig: the scheduler hands over a
+	// *scheduler.Spec, tests may hand over a *systemdConfig.
+	var execCfg Config
+	switch cc := cfg.(type) {
+	case *systemdConfig:
+		if cc == nil {
+			return invalidConfigResult(cfg, startedAt, "check config is nil")
 		}
-	}
-	if checkConfig == nil {
-		return model.CheckResult{
-			CheckID:    cfg.CheckID(),
-			CheckType:  cfg.CheckType(),
-			Success:    false,
-			StartedAt:  startedAt,
-			CompletedAt: time.Now().UTC(),
-			Duration:   time.Since(startedAt),
-			ReasonCode: "invalid_config",
-			Reason:     "check config is nil",
+		execCfg = Config{CheckID: cc.checkID, Target: cc.target, Timeout: cc.timeout}
+	case *scheduler.Spec:
+		if cc == nil {
+			return invalidConfigResult(cfg, startedAt, "check config is nil")
 		}
+		execCfg = Config{CheckID: cc.ID, Target: cc.Target, Timeout: 10 * time.Second}
+	default:
+		return invalidConfigResult(cfg, startedAt, "check config is not spec")
 	}
 
 	// Execute systemd check
-	result, err := c.execute(ctx, Config{
-		CheckID: checkConfig.ID,
-		Target:  checkConfig.Target,
-		Timeout: 10 * time.Second,
-	})
+	result, err := c.execute(ctx, execCfg)
 	if err != nil {
 		c.logger.Printf("systemd check failed: %v", err)
 		return model.CheckResult{
-			CheckID:    cfg.CheckID(),
-			CheckType:  cfg.CheckType(),
-			Success:    false,
-			StartedAt:  startedAt,
+			CheckID:     cfg.CheckID(),
+			CheckType:   cfg.CheckType(),
+			Success:     false,
+			StartedAt:   startedAt,
 			CompletedAt: time.Now().UTC(),
-			Duration:   time.Since(startedAt),
-			ReasonCode: "systemd_failed",
-			Reason:     fmt.Sprintf("systemd check failed: %v", sanitizeReason(err.Error())),
+			Duration:    time.Since(startedAt),
+			ReasonCode:  "systemd_failed",
+			Reason:      fmt.Sprintf("systemd check failed: %v", sanitizeReason(err.Error())),
 		}
 	}
 
 	return result
+}
+
+// invalidConfigResult builds a failed observation for an unusable config.
+func invalidConfigResult(cfg model.CheckConfig, startedAt time.Time, reason string) model.CheckResult {
+	return model.CheckResult{
+		CheckID:     cfg.CheckID(),
+		CheckType:   cfg.CheckType(),
+		Success:     false,
+		StartedAt:   startedAt,
+		CompletedAt: time.Now().UTC(),
+		Duration:    time.Since(startedAt),
+		ReasonCode:  "invalid_config",
+		Reason:      reason,
+	}
 }
 
 // execute runs the systemd check.
@@ -118,26 +119,26 @@ func (c *Check) execute(ctx context.Context, cfg Config) (model.CheckResult, err
 	// Success only if state is exactly "active"
 	if !active {
 		return model.CheckResult{
-			CheckID:    cfg.CheckID,
-			CheckType:  "systemd",
-			Success:    false,
-			StartedAt:  time.Now().UTC(),
+			CheckID:     cfg.CheckID,
+			CheckType:   "systemd",
+			Success:     false,
+			StartedAt:   time.Now().UTC(),
 			CompletedAt: time.Now().UTC(),
-			Duration:   0,
-			ReasonCode: reasonCodeForStatus(status),
-			Reason:     fmt.Sprintf("unit %q is %q", cfg.Target, status),
+			Duration:    0,
+			ReasonCode:  reasonCodeForStatus(status),
+			Reason:      fmt.Sprintf("unit %q is %q", cfg.Target, status),
 		}, nil
 	}
 
 	return model.CheckResult{
-		CheckID:    cfg.CheckID,
-		CheckType:  "systemd",
-		Success:    true,
-		StartedAt:  time.Now().UTC(),
+		CheckID:     cfg.CheckID,
+		CheckType:   "systemd",
+		Success:     true,
+		StartedAt:   time.Now().UTC(),
 		CompletedAt: time.Now().UTC(),
-		Duration:   0,
-		ReasonCode: "success",
-		Reason:     fmt.Sprintf("unit %q is active", cfg.Target),
+		Duration:    0,
+		ReasonCode:  "success",
+		Reason:      fmt.Sprintf("unit %q is active", cfg.Target),
 	}, nil
 }
 

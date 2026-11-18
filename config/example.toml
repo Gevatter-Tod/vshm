@@ -20,8 +20,9 @@
 
 # [metrics] section (optional)
 [metrics]
-  # mounts: filesystem mounts to monitor (default: [])
-  mounts = []
+  # mounts: filesystem mounts to report used/total bytes for via statvfs
+  # (default: ["/"] when omitted or empty)
+  mounts = ["/"]
 
 # [storage] section (optional)
 [storage]

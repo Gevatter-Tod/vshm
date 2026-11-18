@@ -1,509 +1,470 @@
-// Package metrics provides Linux system metrics collection for reporting.
-// It collects load average, memory usage, filesystem metrics, and uptime.
-// Metrics are report-only: never create check failures, incidents, or alerts.
+// Package metrics provides report-only Linux resource metrics collection.
+//
+// Metrics are sampled when a daily report is rendered (the caller passes the
+// render instant) and are never used to create check failures, incidents, or
+// alerts: this package produces only a Snapshot and its rendered text and has
+// no access to the Store, incident service, or outbox.
+//
+// Every metric carries an explicit availability flag. An unavailable source
+// or mount is reported as UNAVAILABLE with a short sanitized reason — never as
+// zero or a guessed value. All persisted/rendered instants are UTC.
+//
+// Linux amd64 only. Mount statistics use the pure-Go stdlib syscall.Statfs, so
+// the CGO_ENABLED=0 build stays C-free and no extra module dependency is needed.
 package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"math"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/Gevatter-Tod/vshm/internal/config"
-	"github.com/Gevatter-Tod/vshm/internal/logging"
 )
 
-// LoadAvgResult represents load average data.
-type LoadAvgResult struct {
+// DefaultMounts is used when [metrics].mounts is omitted or empty.
+// Decision (user-confirmed): the root mount is always reported.
+var DefaultMounts = []string{"/"}
+
+// Bounded reason codes for unavailable metrics.
+const (
+	ReasonOK            = "ok"
+	ReasonReadFailed    = "read_failed"
+	ReasonParseFailed   = "parse_failed"
+	ReasonMissingField  = "missing_field"
+	ReasonStatvfsFailed = "statvfs_failed"
+	ReasonCancelled     = "cancelled"
+	maxReasonLen        = 120
+	mib                 = 1024 * 1024
+)
+
+// LoadAvgSample is a raw /proc/loadavg sample.
+type LoadAvgSample struct {
 	Load1  float64
 	Load5  float64
 	Load15 float64
 }
 
-// MeminfoResult represents memory info data.
-type MeminfoResult struct {
-	MemTotal     *uint64
-	MemAvailable *uint64
+// MeminfoSample is a raw /proc/meminfo sample, already converted to bytes.
+type MeminfoSample struct {
+	TotalBytes     uint64
+	AvailableBytes uint64
 }
 
-// FSProvider provides procfs-style data access.
-type FSProvider interface {
-	LoadAvg() (*LoadAvgResult, error)
-	Meminfo() (*MeminfoResult, error)
+// StatfsSample is a raw statvfs sample, already converted to bytes.
+type StatfsSample struct {
+	TotalBytes     uint64 // f_blocks * f_bsize
+	FreeBytes      uint64 // f_bfree * f_bsize
+	AvailableBytes uint64 // f_bavail * f_bsize (available to unprivileged processes)
 }
 
-// StatfsProvider provides filesystem statfs operations.
-type StatfsProvider interface {
-	Statvfs(path string, buf *syscall.Statfs_t) error
-}
-
-// UptimeProvider reads uptime from /proc/uptime.
-type UptimeProvider interface {
+// ProcReader abstracts the procfs sources so tests can inject fakes or
+// fixture directories.
+type ProcReader interface {
+	ReadLoadAvg() (LoadAvgSample, error)
+	ReadMeminfo() (MeminfoSample, error)
 	ReadUptime() (time.Duration, error)
 }
 
-// HostnameProvider reads the system hostname.
-type HostnameProvider interface {
-	ReadHostname() (string, error)
+// Statvfs abstracts the statvfs(2) call so tests can inject fakes.
+type Statvfs interface {
+	Statvfs(path string) (StatfsSample, error)
 }
 
-// Collector collects system metrics.
-type Collector struct {
-	logger     *logging.Logger
-	fsProvider FSProvider
-	statfs     StatfsProvider
-	uptime     UptimeProvider
-	hostname   HostnameProvider
+// LoadMetric is the 1/5/15-minute load average with availability.
+type LoadMetric struct {
+	Available            bool
+	Load1, Load5, Load15 float64
+	ReasonCode           string
+	Reason               string
 }
 
-// MemoryMetrics holds memory information.
-type MemoryMetrics struct {
+// MemoryMetric is RAM total/available/used (used = total - available).
+type MemoryMetric struct {
+	Available      bool
 	TotalBytes     uint64
 	AvailableBytes uint64
 	UsedBytes      uint64
-	UsedPercent    float64
-	TotalMiB       float64
-	AvailableMiB   float64
-	UsedMiB        float64
-	Unavailable    bool
+	ReasonCode     string
 	Reason         string
 }
 
-// FilesystemMetrics holds filesystem information.
-type FilesystemMetrics struct {
-	MountPoint       string
-	TotalBytes       uint64
-	AvailableBytes   uint64
-	UsedBytes        uint64
-	UsedPercent      float64
-	AvailablePercent float64
-	TotalMiB         float64
-	AvailableMiB     float64
-	UsedMiB          float64
-	Unavailable      bool
-	ReasonCode       string
-	Reason           string
+// MountMetric is used/total bytes for one configured mount.
+type MountMetric struct {
+	Mount          string
+	Available      bool
+	TotalBytes     uint64
+	AvailableBytes uint64
+	UsedBytes      uint64 // total - free (df "used" semantics, includes reserved blocks)
+	ReasonCode     string
+	Reason         string
 }
 
-// MetricsSnapshot holds all collected system metrics.
-type MetricsSnapshot struct {
-	HostName          string
-	LoadAvg1Min       float64
-	LoadAvg5Min       float64
-	LoadAvg15Min      float64
-	LoadUnavailable   bool
-	LoadReason        string
-	Memory            MemoryMetrics
-	FS                []FilesystemMetrics
-	Uptime            time.Duration
-	UptimeUnavailable bool
-	UptimeReason      string
-	CollectionTime    time.Time
+// UptimeMetric is host uptime from /proc/uptime.
+type UptimeMetric struct {
+	Available  bool
+	Uptime     time.Duration
+	ReasonCode string
+	Reason     string
 }
 
-// New creates a new metrics collector with injected dependencies.
-func New(logger *logging.Logger, fsProvider FSProvider, statfs StatfsProvider) *Collector {
-	return &Collector{
-		logger:     logger,
-		fsProvider: fsProvider,
-		statfs:     statfs,
-		uptime:     &defaultUptimeProvider{},
-		hostname:   &defaultHostnameProvider{},
-	}
+// Snapshot is the full set of resource metrics captured at CollectedAt.
+// CollectedAt is the UTC instant at which the daily report is rendered.
+type Snapshot struct {
+	CollectedAt time.Time
+	Load        LoadMetric
+	Memory      MemoryMetric
+	Mounts      []MountMetric
+	Uptime      UptimeMetric
 }
 
-// NewWithDefaults creates a new metrics collector with default dependencies.
-func NewWithDefaults(logger *logging.Logger) *Collector {
-	return New(logger, nil, nil)
+// Collector gathers report-only system metrics from injected providers.
+type Collector struct {
+	proc ProcReader
+	fs   Statvfs
 }
 
-// Collect gathers all system metrics and returns a snapshot.
-func (c *Collector) Collect(ctx context.Context, cfg config.MetricsConfig, now time.Time) (*MetricsSnapshot, error) {
-	snap := &MetricsSnapshot{CollectionTime: now}
-
-	snap.HostName, _ = c.hostname.ReadHostname()
-
-	if err := c.collectLoadAverage(snap); err != nil {
-		c.logger.Printf("[metrics] Load average unavailable: %v", err)
-	}
-
-	if err := c.collectMemory(snap); err != nil {
-		c.logger.Printf("[metrics] Memory metrics unavailable: %v", err)
-	}
-
-	if err := c.collectFilesystems(cfg, snap); err != nil {
-		c.logger.Printf("[metrics] Filesystem metrics unavailable: %v", err)
-	}
-
-	if err := c.collectUptime(snap); err != nil {
-		c.logger.Printf("[metrics] Uptime unavailable: %v", err)
-	}
-
-	return snap, nil
+// New creates a Collector with injected proc reader and statvfs provider.
+func New(proc ProcReader, fs Statvfs) *Collector {
+	return &Collector{proc: proc, fs: fs}
 }
 
-// collectLoadAverage reads load averages from /proc/loadavg.
-func (c *Collector) collectLoadAverage(snap *MetricsSnapshot) error {
-	var loadAvg *LoadAvgResult
-	var err error
-
-	if c.fsProvider != nil {
-		loadAvg, err = c.fsProvider.LoadAvg()
-	} else {
-		loadAvg, err = getDefaultFS().LoadAvg()
-	}
-
-	if err != nil {
-		snap.LoadUnavailable = true
-		snap.LoadReason = fmt.Sprintf("load average unavailable: %v", err)
-		return fmt.Errorf("load average unavailable: %w", err)
-	}
-
-	snap.LoadAvg1Min = loadAvg.Load1
-	snap.LoadAvg5Min = loadAvg.Load5
-	snap.LoadAvg15Min = loadAvg.Load15
-	return nil
+// NewWithDefaults creates a Collector reading the real /proc and statvfs(2).
+func NewWithDefaults() *Collector {
+	return New(NewProcReader("/proc"), RealStatvfs{})
 }
 
-// collectMemory reads memory information from /proc/meminfo.
-func (c *Collector) collectMemory(snap *MetricsSnapshot) error {
-	var meminfo *MeminfoResult
-	var err error
-
-	if c.fsProvider != nil {
-		meminfo, err = c.fsProvider.Meminfo()
-	} else {
-		meminfo, err = getDefaultFS().Meminfo()
-	}
-
-	if err != nil {
-		snap.Memory.Unavailable = true
-		snap.Memory.Reason = fmt.Sprintf("memory metrics unavailable: %v", err)
-		return fmt.Errorf("memory metrics unavailable: %w", err)
-	}
-
-	if meminfo.MemTotal == nil {
-		snap.Memory.Unavailable = true
-		snap.Memory.Reason = "MemTotal not available in /proc/meminfo"
-		return fmt.Errorf("MemTotal not available in /proc/meminfo")
-	}
-
-	// Convert from KiB to bytes
-	memTotalKB := *meminfo.MemTotal
-	memAvailKB := uint64(0)
-	if meminfo.MemAvailable != nil {
-		memAvailKB = *meminfo.MemAvailable
-	}
-
-	snap.Memory.TotalBytes = memTotalKB * 1024
-	snap.Memory.AvailableBytes = memAvailKB * 1024
-	snap.Memory.UsedBytes = snap.Memory.TotalBytes - snap.Memory.AvailableBytes
-
-	if snap.Memory.TotalBytes > 0 {
-		snap.Memory.UsedPercent = float64(snap.Memory.UsedBytes) / float64(snap.Memory.TotalBytes) * 100
-	}
-
-	snap.Memory.TotalMiB = roundTo2(float64(snap.Memory.TotalBytes) / (1024 * 1024))
-	snap.Memory.AvailableMiB = roundTo2(float64(snap.Memory.AvailableBytes) / (1024 * 1024))
-	snap.Memory.UsedMiB = roundTo2(float64(snap.Memory.UsedBytes) / (1024 * 1024))
-
-	return nil
-}
-
-// collectFilesystems reads filesystem metrics for configured mounts.
-func (c *Collector) collectFilesystems(cfg config.MetricsConfig, snap *MetricsSnapshot) error {
-	mounts := cfg.Mounts
+// ResolveMounts applies the configured [metrics].mounts, defaulting to the
+// root mount when the list is omitted or empty.
+func ResolveMounts(mounts []string) []string {
 	if len(mounts) == 0 {
-		mounts = []string{"/"}
+		out := make([]string, len(DefaultMounts))
+		copy(out, DefaultMounts)
+		return out
 	}
-
-	for _, mount := range mounts {
-		fsMetrics := c.collectFilesystem(mount)
-		snap.FS = append(snap.FS, fsMetrics)
-	}
-
-	return nil
+	out := make([]string, len(mounts))
+	copy(out, mounts)
+	return out
 }
 
-// collectFilesystem reads metrics for a single mount point.
-func (c *Collector) collectFilesystem(mount string) FilesystemMetrics {
-	fs := FilesystemMetrics{
-		MountPoint: mount,
-	}
+// Collect samples all metrics. now is the report-render instant and is stored
+// as the UTC collection time. Each source is independent: a failing source
+// marks only its own metric unavailable; Collect itself never fails the report.
+func (c *Collector) Collect(ctx context.Context, mounts []string, now time.Time) Snapshot {
+	snap := Snapshot{CollectedAt: now.UTC()}
 
-	var stat syscall.Statfs_t
-	var err error
-
-	if c.statfs != nil {
-		err = c.statfs.Statvfs(mount, &stat)
-	} else {
-		err = syscall.Statfs(mount, &stat)
-	}
-
-	if err != nil {
-		fs.Unavailable = true
-		fs.ReasonCode = "statvfs_failed"
-		fs.Reason = fmt.Sprintf("statvfs failed for %q: %v", mount, err)
-		return fs
-	}
-
-	// statfs: f_blocks = total blocks, f_bavail = free blocks (non-privileged), f_bsize = block size
-	totalBytes := uint64(stat.Blocks) * uint64(stat.Bsize)
-	availBytes := uint64(stat.Bavail) * uint64(stat.Bsize)
-	usedBytes := totalBytes - availBytes
-
-	fs.TotalBytes = totalBytes
-	fs.AvailableBytes = availBytes
-	fs.UsedBytes = usedBytes
-
-	if totalBytes > 0 {
-		fs.UsedPercent = float64(usedBytes) / float64(totalBytes) * 100
-		fs.AvailablePercent = float64(availBytes) / float64(totalBytes) * 100
-	}
-
-	fs.TotalMiB = roundTo2(float64(totalBytes) / (1024 * 1024))
-	fs.AvailableMiB = roundTo2(float64(availBytes) / (1024 * 1024))
-	fs.UsedMiB = roundTo2(float64(usedBytes) / (1024 * 1024))
-
-	fs.ReasonCode = "success"
-	fs.Reason = fmt.Sprintf("filesystem is mounted at %q", mount)
-	return fs
-}
-
-// collectUptime reads uptime from /proc/uptime.
-func (c *Collector) collectUptime(snap *MetricsSnapshot) error {
-	d, err := c.uptime.ReadUptime()
-	if err != nil {
-		snap.UptimeUnavailable = true
-		snap.UptimeReason = fmt.Sprintf("uptime unavailable: %v", err)
-		return fmt.Errorf("uptime unavailable: %w", err)
-	}
-
-	snap.Uptime = d
-	return nil
-}
-
-// FormatLoadAverage returns a human-readable load average string.
-func FormatLoadAverage(load1 float64) string {
-	return fmt.Sprintf("%.2f", load1)
-}
-
-// FormatBytes returns a human-readable byte string with MiB units.
-func FormatBytes(bytes uint64) string {
-	miB := float64(bytes) / (1024 * 1024)
-	return fmt.Sprintf("%.1f MiB", miB)
-}
-
-// FormatPercent returns a formatted percentage string.
-func FormatPercent(pct float64) string {
-	return fmt.Sprintf("%.1f%%", pct)
-}
-
-// FormatUptime returns a human-readable uptime string (d h m s).
-func FormatUptime(uptime time.Duration) string {
-	days := int(uptime.Hours() / 24)
-	hours := int(uptime.Hours()) % 24
-	minutes := int(uptime.Minutes()) % 60
-	seconds := int(uptime.Seconds()) % 60
-
-	if days > 0 {
-		return fmt.Sprintf("%dd %dh %dm %ds", days, hours, minutes, seconds)
-	}
-	return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
-}
-
-// RenderReport renders metrics snapshot into a report string.
-func RenderReport(snap *MetricsSnapshot) string {
-	var sb strings.Builder
-
-	sb.WriteString("=== System Metrics ===\n\n")
-
-	// Hostname
-	sb.WriteString(fmt.Sprintf("Host: %s\n", snap.HostName))
-	sb.WriteString(fmt.Sprintf("Collected at: %s\n\n", snap.CollectionTime.UTC().Format(time.RFC3339)))
-
-	// Load average
-	if snap.LoadUnavailable {
-		sb.WriteString(fmt.Sprintf("Load average: UNAVAILABLE (%s)\n\n", snap.LoadReason))
-	} else {
-		sb.WriteString(fmt.Sprintf("Load average (1m/5m/15m): %s / %s / %s\n\n",
-			FormatLoadAverage(snap.LoadAvg1Min),
-			FormatLoadAverage(snap.LoadAvg5Min),
-			FormatLoadAverage(snap.LoadAvg15Min)))
-	}
-
-	// Memory
-	sb.WriteString("Memory:\n")
-	if snap.Memory.Unavailable {
-		sb.WriteString(fmt.Sprintf("  Total/Available: UNAVAILABLE (%s)\n", snap.Memory.Reason))
-	} else {
-		sb.WriteString(fmt.Sprintf("  Total: %s\n", FormatBytes(snap.Memory.TotalBytes)))
-		sb.WriteString(fmt.Sprintf("  Available: %s\n", FormatBytes(snap.Memory.AvailableBytes)))
-		sb.WriteString(fmt.Sprintf("  Used: %s (%s)\n", FormatBytes(snap.Memory.UsedBytes), FormatPercent(snap.Memory.UsedPercent)))
-	}
-	sb.WriteString("\n")
-
-	// Filesystems
-	sb.WriteString("Filesystems:\n")
-	if len(snap.FS) == 0 {
-		sb.WriteString("  No filesystems configured for metrics\n")
-	} else {
-		for _, fs := range snap.FS {
-			sb.WriteString(fmt.Sprintf("  %s:\n", fs.MountPoint))
-			if fs.Unavailable {
-				sb.WriteString(fmt.Sprintf("    Status: UNAVAILABLE (%s)\n", fs.Reason))
-			} else {
-				sb.WriteString(fmt.Sprintf("    Total: %s\n", FormatBytes(fs.TotalBytes)))
-				sb.WriteString(fmt.Sprintf("    Available: %s (%s)\n", FormatBytes(fs.AvailableBytes), FormatPercent(fs.AvailablePercent)))
-				sb.WriteString(fmt.Sprintf("    Used: %s (%s)\n", FormatBytes(fs.UsedBytes), FormatPercent(fs.UsedPercent)))
-			}
+	if err := ctx.Err(); err != nil {
+		reason := sanitizeReason(ReasonCancelled, err)
+		snap.Load = unavailableLoad(ReasonCancelled, reason)
+		snap.Memory = unavailableMemory(ReasonCancelled, reason)
+		snap.Uptime = unavailableUptime(ReasonCancelled, reason)
+		for _, m := range ResolveMounts(mounts) {
+			snap.Mounts = append(snap.Mounts, unavailableMount(m, ReasonCancelled, reason))
 		}
-	}
-	sb.WriteString("\n")
-
-	// Uptime
-	sb.WriteString("Uptime:\n")
-	if snap.UptimeUnavailable {
-		sb.WriteString(fmt.Sprintf("  UNAVAILABLE (%s)\n", snap.UptimeReason))
-	} else {
-		sb.WriteString(fmt.Sprintf("  %s\n", FormatUptime(snap.Uptime)))
+		return snap
 	}
 
-	return sb.String()
-}
-
-// Default implementations
-
-type defaultFS struct {
-	loadAvg  *LoadAvgResult
-	meminfo  *MeminfoResult
-	loadErr  error
-	memErr   error
-	loaded   bool
-}
-
-func (f *defaultFS) LoadAvg() (*LoadAvgResult, error) {
-	if f.loaded {
-		return f.loadAvg, f.loadErr
-	}
-	f.loaded = true
-
-	data, err := os.ReadFile("/proc/loadavg")
-	if err != nil {
-		f.loadErr = err
-		return nil, err
-	}
-
-	var load1, load5, load15 float64
-	n, err := fmt.Sscanf(string(data), "%f %f %f", &load1, &load5, &load15)
-	if err != nil || n < 1 {
-		f.loadErr = err
-		return nil, err
-	}
-
-	result := &LoadAvgResult{Load1: load1, Load5: load5, Load15: load15}
-	f.loadAvg = result
-	return result, nil
-}
-
-func (f *defaultFS) Meminfo() (*MeminfoResult, error) {
-	if f.loaded {
-		return f.meminfo, f.memErr
-	}
-	f.loaded = true
-
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		f.memErr = err
-		return nil, err
-	}
-
-	result := &MeminfoResult{}
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		var key string
-		var value uint64
-		n, err := fmt.Sscanf(line, "MemTotal: %d kB", &value)
-		if err == nil && n == 1 {
-			result.MemTotal = &value
+	snap.Load = c.collectLoad(ctx)
+	snap.Memory = c.collectMemory(ctx)
+	snap.Uptime = c.collectUptime(ctx)
+	for _, m := range ResolveMounts(mounts) {
+		if ctx.Err() != nil {
+			snap.Mounts = append(snap.Mounts, unavailableMount(m, ReasonCancelled, sanitizeReason(ReasonCancelled, ctx.Err())))
 			continue
 		}
-		n, err = fmt.Sscanf(line, "MemAvailable: %d kB", &value)
-		if err == nil && n == 1 {
-			result.MemAvailable = &value
-		}
+		snap.Mounts = append(snap.Mounts, c.collectMount(m))
 	}
-
-	if result.MemTotal == nil {
-		f.memErr = fmt.Errorf("MemTotal not found in /proc/meminfo")
-		return nil, f.memErr
-	}
-
-	f.meminfo = result
-	return result, nil
+	return snap
 }
 
-type defaultUptimeProvider struct{}
-
-func (p *defaultUptimeProvider) ReadUptime() (time.Duration, error) {
-	data, err := os.ReadFile("/proc/uptime")
+func (c *Collector) collectLoad(ctx context.Context) LoadMetric {
+	if err := ctx.Err(); err != nil {
+		return unavailableLoad(ReasonCancelled, sanitizeReason(ReasonCancelled, err))
+	}
+	s, err := c.proc.ReadLoadAvg()
 	if err != nil {
-		return 0, fmt.Errorf("read /proc/uptime: %w", err)
+		return unavailableLoad(reasonCodeOf(err), sanitizeReason(reasonCodeOf(err), err))
 	}
+	return LoadMetric{Available: true, Load1: s.Load1, Load5: s.Load5, Load15: s.Load15, ReasonCode: ReasonOK}
+}
 
-	var seconds float64
-	n, err := fmt.Sscanf(string(data), "%f", &seconds)
-	if err != nil || n != 1 {
-		return 0, fmt.Errorf("parse /proc/uptime: invalid format")
+func (c *Collector) collectMemory(ctx context.Context) MemoryMetric {
+	if err := ctx.Err(); err != nil {
+		return unavailableMemory(ReasonCancelled, sanitizeReason(ReasonCancelled, err))
 	}
+	s, err := c.proc.ReadMeminfo()
+	if err != nil {
+		return unavailableMemory(reasonCodeOf(err), sanitizeReason(reasonCodeOf(err), err))
+	}
+	return MemoryMetric{
+		Available:      true,
+		TotalBytes:     s.TotalBytes,
+		AvailableBytes: s.AvailableBytes,
+		UsedBytes:      s.TotalBytes - s.AvailableBytes, // spec formula: used = total - available
+		ReasonCode:     ReasonOK,
+	}
+}
 
+func (c *Collector) collectUptime(ctx context.Context) UptimeMetric {
+	if err := ctx.Err(); err != nil {
+		return unavailableUptime(ReasonCancelled, sanitizeReason(ReasonCancelled, err))
+	}
+	d, err := c.proc.ReadUptime()
+	if err != nil {
+		return unavailableUptime(reasonCodeOf(err), sanitizeReason(reasonCodeOf(err), err))
+	}
+	return UptimeMetric{Available: true, Uptime: d, ReasonCode: ReasonOK}
+}
+
+func (c *Collector) collectMount(mount string) MountMetric {
+	s, err := c.fs.Statvfs(mount)
+	if err != nil {
+		return unavailableMount(mount, ReasonStatvfsFailed, sanitizeReason(ReasonStatvfsFailed, err))
+	}
+	return MountMetric{
+		Mount:          mount,
+		Available:      true,
+		TotalBytes:     s.TotalBytes,
+		AvailableBytes: s.AvailableBytes,
+		UsedBytes:      s.TotalBytes - s.FreeBytes,
+		ReasonCode:     ReasonOK,
+	}
+}
+
+func unavailableLoad(code, reason string) LoadMetric {
+	return LoadMetric{ReasonCode: code, Reason: reason}
+}
+
+func unavailableMemory(code, reason string) MemoryMetric {
+	return MemoryMetric{ReasonCode: code, Reason: reason}
+}
+
+func unavailableUptime(code, reason string) UptimeMetric {
+	return UptimeMetric{ReasonCode: code, Reason: reason}
+}
+
+func unavailableMount(mount, code, reason string) MountMetric {
+	return MountMetric{Mount: mount, ReasonCode: code, Reason: reason}
+}
+
+// errMissingField marks parse errors caused by a missing proc field.
+type errMissingField struct{ field string }
+
+func (e errMissingField) Error() string { return "missing field: " + e.field }
+
+// errParseFailed marks malformed proc content.
+type errParseFailed struct{}
+
+func (errParseFailed) Error() string { return "malformed proc content" }
+
+// reasonCodeOf maps an error to a bounded reason code.
+func reasonCodeOf(err error) string {
+	var mf errMissingField
+	if errors.As(err, &mf) {
+		return ReasonMissingField
+	}
+	var pf errParseFailed
+	if errors.As(err, &pf) {
+		return ReasonParseFailed
+	}
+	return ReasonReadFailed
+}
+
+// sanitizeReason produces a short, single-line, bounded, non-secret reason
+// string of the form "<code>: <err>".
+func sanitizeReason(code string, err error) string {
+	msg := err.Error()
+	msg = strings.ReplaceAll(msg, "\n", " ")
+	msg = strings.ReplaceAll(msg, "\r", " ")
+	r := code + ": " + msg
+	if len(r) > maxReasonLen {
+		r = r[:maxReasonLen-3] + "..."
+	}
+	return r
+}
+
+// ProcFS reads proc sources from a root directory (default /proc), which lets
+// tests point the reader at fixture trees.
+type ProcFS struct {
+	Root string
+}
+
+// NewProcReader returns a ProcReader reading from root (use "/proc" in
+// production).
+func NewProcReader(root string) ProcReader {
+	return ProcFS{Root: root}
+}
+
+func (p ProcFS) read(name string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(p.Root, name))
+}
+
+// ReadLoadAvg parses /proc/loadavg: "<load1> <load5> <load15> <running>/<total> ...".
+func (p ProcFS) ReadLoadAvg() (LoadAvgSample, error) {
+	data, err := p.read("loadavg")
+	if err != nil {
+		return LoadAvgSample{}, err
+	}
+	return parseLoadAvg(data)
+}
+
+// ReadMeminfo parses MemTotal/MemAvailable (kB) from /proc/meminfo into bytes.
+// Both fields are required: a missing field is an error, never a guessed zero.
+func (p ProcFS) ReadMeminfo() (MeminfoSample, error) {
+	data, err := p.read("meminfo")
+	if err != nil {
+		return MeminfoSample{}, err
+	}
+	return parseMeminfo(data)
+}
+
+// ReadUptime parses the first field (seconds) of /proc/uptime.
+func (p ProcFS) ReadUptime() (time.Duration, error) {
+	data, err := p.read("uptime")
+	if err != nil {
+		return 0, err
+	}
+	return parseUptime(data)
+}
+
+func parseLoadAvg(data []byte) (LoadAvgSample, error) {
+	fields := strings.Fields(string(data))
+	if len(fields) < 3 {
+		return LoadAvgSample{}, fmt.Errorf("%w: loadavg needs 3 fields, got %d", errParseFailed{}, len(fields))
+	}
+	var s LoadAvgSample
+	var err error
+	if s.Load1, err = strconv.ParseFloat(fields[0], 64); err != nil {
+		return LoadAvgSample{}, fmt.Errorf("%w: load1 %q", errParseFailed{}, fields[0])
+	}
+	if s.Load5, err = strconv.ParseFloat(fields[1], 64); err != nil {
+		return LoadAvgSample{}, fmt.Errorf("%w: load5 %q", errParseFailed{}, fields[1])
+	}
+	if s.Load15, err = strconv.ParseFloat(fields[2], 64); err != nil {
+		return LoadAvgSample{}, fmt.Errorf("%w: load15 %q", errParseFailed{}, fields[2])
+	}
+	return s, nil
+}
+
+func parseMeminfo(data []byte) (MeminfoSample, error) {
+	var total, avail *uint64
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		key := strings.TrimSuffix(fields[0], ":")
+		if key != "MemTotal" && key != "MemAvailable" {
+			continue
+		}
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return MeminfoSample{}, fmt.Errorf("%w: %s value %q", errParseFailed{}, key, fields[1])
+		}
+		if len(fields) < 3 || !strings.EqualFold(fields[2], "kB") {
+			return MeminfoSample{}, fmt.Errorf("%w: %s unit %q is not kB", errParseFailed{}, key, strings.Join(fields[2:], " "))
+		}
+		kb := value * 1024
+		switch key {
+		case "MemTotal":
+			total = &kb
+		case "MemAvailable":
+			avail = &kb
+		}
+	}
+	if total == nil {
+		return MeminfoSample{}, errMissingField{field: "MemTotal"}
+	}
+	if avail == nil {
+		return MeminfoSample{}, errMissingField{field: "MemAvailable"}
+	}
+	return MeminfoSample{TotalBytes: *total, AvailableBytes: *avail}, nil
+}
+
+func parseUptime(data []byte) (time.Duration, error) {
+	fields := strings.Fields(string(data))
+	if len(fields) < 1 {
+		return 0, fmt.Errorf("%w: uptime is empty", errParseFailed{})
+	}
+	seconds, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || seconds < 0 {
+		return 0, fmt.Errorf("%w: uptime %q", errParseFailed{}, fields[0])
+	}
 	return time.Duration(seconds * float64(time.Second)), nil
 }
 
-type defaultHostnameProvider struct{}
+// RealStatvfs implements Statvfs with the pure-Go stdlib syscall.Statfs, which
+// requires no CGO and works in the CGO_ENABLED=0 Linux amd64 build.
+type RealStatvfs struct{}
 
-func (p *defaultHostnameProvider) ReadHostname() (string, error) {
-	data, err := os.ReadFile("/etc/hostname")
-	if err == nil {
-		return strings.TrimSpace(string(data)), nil
+// Statvfs calls statvfs(2) and converts the result to bytes.
+func (RealStatvfs) Statvfs(path string) (StatfsSample, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return StatfsSample{}, err
+	}
+	if st.Bsize <= 0 {
+		return StatfsSample{}, fmt.Errorf("invalid block size %d for %q", st.Bsize, path)
+	}
+	bsize := uint64(st.Bsize)
+	return StatfsSample{
+		TotalBytes:     uint64(st.Blocks) * bsize,
+		FreeBytes:      uint64(st.Bfree) * bsize,
+		AvailableBytes: uint64(st.Bavail) * bsize,
+	}, nil
+}
+
+// FormatLoad formats a load average with two decimals.
+func FormatLoad(f float64) string { return strconv.FormatFloat(f, 'f', 2, 64) }
+
+// FormatMiB formats a byte count with an explicit MiB unit.
+func FormatMiB(b uint64) string {
+	return fmt.Sprintf("%.1f MiB", float64(b)/float64(mib))
+}
+
+// FormatUptime formats an uptime with an explicit seconds unit.
+func FormatUptime(d time.Duration) string {
+	return fmt.Sprintf("%ds", int64(d.Seconds()))
+}
+
+// Render renders the snapshot as a plain-text metrics block with explicit
+// units. Unavailable metrics render as UNAVAILABLE(<reason>), never zero.
+func Render(s Snapshot) string {
+	var sb strings.Builder
+	sb.WriteString("metrics:\n")
+	sb.WriteString("  collected_at=" + s.CollectedAt.UTC().Format(time.RFC3339) + "\n")
+
+	if s.Load.Available {
+		sb.WriteString(fmt.Sprintf("  load1=%s load5=%s load15=%s\n",
+			FormatLoad(s.Load.Load1), FormatLoad(s.Load.Load5), FormatLoad(s.Load.Load15)))
+	} else {
+		sb.WriteString(fmt.Sprintf("  load=UNAVAILABLE(%s)\n", s.Load.Reason))
 	}
 
-	data, err = os.ReadFile("/proc/sys/kernel/hostname")
-	if err == nil {
-		return strings.TrimSpace(string(data)), nil
+	if s.Memory.Available {
+		sb.WriteString(fmt.Sprintf("  mem_total=%s mem_available=%s mem_used=%s\n",
+			FormatMiB(s.Memory.TotalBytes), FormatMiB(s.Memory.AvailableBytes), FormatMiB(s.Memory.UsedBytes)))
+	} else {
+		sb.WriteString(fmt.Sprintf("  mem=UNAVAILABLE(%s)\n", s.Memory.Reason))
 	}
 
-	return "unknown", nil
-}
-
-// getDefaultFS returns a default FSProvider.
-var _defaultFSOnce syncOnce
-var _defaultFS defaultFS
-
-func getDefaultFS() *defaultFS {
-	_defaultFSOnce.Do(func() {
-		// Initialize with defaults
-	})
-	return &_defaultFS
-}
-
-// syncOnce provides a simple sync.Once-like pattern.
-type syncOnce struct {
-	done bool
-}
-
-func (o *syncOnce) Do(f func()) {
-	if o.done {
-		return
+	for _, m := range s.Mounts {
+		if m.Available {
+			sb.WriteString(fmt.Sprintf("  mount %s: total=%s available=%s used=%s\n",
+				m.Mount, FormatMiB(m.TotalBytes), FormatMiB(m.AvailableBytes), FormatMiB(m.UsedBytes)))
+		} else {
+			sb.WriteString(fmt.Sprintf("  mount %s: UNAVAILABLE(%s)\n", m.Mount, m.Reason))
+		}
 	}
-	f()
-	o.done = true
-}
 
-// roundTo2 rounds a float to 2 decimal places.
-func roundTo2(f float64) float64 {
-	return math.Round(f*100) / 100
+	if s.Uptime.Available {
+		sb.WriteString(fmt.Sprintf("  uptime=%s\n", FormatUptime(s.Uptime.Uptime)))
+	} else {
+		sb.WriteString(fmt.Sprintf("  uptime=UNAVAILABLE(%s)\n", s.Uptime.Reason))
+	}
+
+	return sb.String()
 }
