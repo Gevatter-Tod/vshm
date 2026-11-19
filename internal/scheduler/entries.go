@@ -27,8 +27,21 @@ type Spec struct {
 	BodyContains   string
 	CredentialFile string
 	Timeout        time.Duration
-	// Ping-specific fields
+	// Ping/systemd shared field
 	Target string
+	// MySQL-specific fields (nil unless Typ == "mysql")
+	MySQL *MySQLSpec
+}
+
+// MySQLSpec carries the typed MySQL check fields into the mysql adapter.
+type MySQLSpec struct {
+	Host           string
+	Port           int    // 0 means default 3306 (TCP only)
+	Socket         string // local Unix socket; mutually exclusive with Host/Port/TLSCA
+	Database       string // explicit check database overrides the credential-file database
+	CredentialFile string
+	TLSCA          string // required for TCP
+	Query          string // single read-only SELECT
 }
 
 // CheckID returns the check ID.
@@ -116,10 +129,22 @@ func EntriesFromConfig(cfg *config.Config, reg model.Registry) ([]Entry, error) 
 		if c.Type == "systemd" {
 			target = c.Target
 		}
+		var mys *MySQLSpec
+		if c.Type == "mysql" {
+			mys = &MySQLSpec{
+				Host:           c.Host,
+				Port:           c.Port,
+				Socket:         c.Socket,
+				Database:       c.Database,
+				CredentialFile: c.CredentialFile,
+				TLSCA:          c.TLSCA,
+				Query:          c.Query,
+			}
+		}
 
 		entries = append(entries, Entry{
 			Check:    adapter,
-			Config:   &Spec{ID: c.CheckID, Typ: c.Type, URL: httpFields.url, ExpectedStatus: httpFields.expectedStatus, BodyContains: httpFields.bodyContains, CredentialFile: httpFields.credentialFile, Target: target},
+			Config:   &Spec{ID: c.CheckID, Typ: c.Type, URL: httpFields.url, ExpectedStatus: httpFields.expectedStatus, BodyContains: httpFields.bodyContains, CredentialFile: httpFields.credentialFile, Target: target, MySQL: mys},
 			Interval: iv,
 			Timeout:  to,
 		})

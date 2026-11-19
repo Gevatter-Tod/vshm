@@ -103,11 +103,15 @@
   # mysql-specific: credential file path
   credential_file = "/etc/vshm/secrets/mysql.ini"
   
-  # mysql-specific: optional TLS CA certificate
+  # mysql-specific: TLS CA certificate (REQUIRED for TCP; verified TLS with hostname check)
   tls_ca = "/etc/vshm/certs/ca.pem"
   
-  # mysql-specific: optional query to execute
+  # mysql-specific: single read-only SELECT to execute (one optional trailing semicolon)
   query = "SELECT 1"
+  
+  # mysql-specific: local Unix socket as an alternative to host/port/tls_ca
+  # (no network TLS on sockets; mutually exclusive with host, port and tls_ca)
+  # socket = "/run/mysqld/mysqld.sock"
   
   interval = "5m"
   timeout = "10s"

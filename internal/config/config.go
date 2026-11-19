@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/Gevatter-Tod/vshm/internal/sqlsafe"
 )
 
 // AgentConfig represents the [agent] section configuration.
@@ -49,6 +52,12 @@ type CheckConfig struct {
 	Host string `toml:"host,omitempty"`
 	// Systemd-specific fields
 	Target string `toml:"target,omitempty"`
+	// MySQL-specific fields (host and credential_file are shared with ping/http)
+	Port     int    `toml:"port,omitempty"`
+	Socket   string `toml:"socket,omitempty"`
+	Database string `toml:"database,omitempty"`
+	TLSCA    string `toml:"tls_ca,omitempty"`
+	Query    string `toml:"query,omitempty"`
 }
 
 // CheckType represents the type of check.
@@ -328,12 +337,73 @@ func validateChecks(checks []CheckConfig) error {
 				errs = append(errs, fmt.Errorf("checks[%d]: target is required for systemd checks", i))
 			}
 		}
+
+		// Validate MySQL-specific fields
+		if check.Type == "mysql" {
+			if err := validateMySQLCheck(check); err != nil {
+				errs = append(errs, fmt.Errorf("checks[%d]: %w", i, err))
+			}
+		}
 	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("checks validation failed: %w", multiError(errs))
 	}
 
+	return nil
+}
+
+// validateMySQLCheck validates the MySQL check schema (spec §3 / wp01):
+// query required and must be a single read-only SELECT (sqlsafe); credential_file
+// required and subject to secret-file rules; either host (TCP, tls_ca required,
+// port default 3306) or socket (absolute path, mutually exclusive with
+// host/port/tls_ca, no network TLS). A check-level database overrides the
+// optional credential-file database.
+func validateMySQLCheck(check CheckConfig) error {
+	var errs []error
+
+	if check.Query == "" {
+		errs = append(errs, errors.New("query is required for mysql checks"))
+	} else if _, err := sqlsafe.Validate(check.Query); err != nil {
+		errs = append(errs, fmt.Errorf("invalid query: %w", err))
+	}
+
+	if check.CredentialFile == "" {
+		errs = append(errs, errors.New("credential_file is required for mysql checks"))
+	} else if err := validateSecretFile(check.CredentialFile); err != nil {
+		errs = append(errs, err)
+	}
+
+	if check.Socket != "" {
+		if !filepath.IsAbs(check.Socket) {
+			errs = append(errs, errors.New("socket must be an absolute path"))
+		}
+		if check.Host != "" {
+			errs = append(errs, errors.New("host must not be set when socket is used"))
+		}
+		if check.Port != 0 {
+			errs = append(errs, errors.New("port must not be set when socket is used"))
+		}
+		if check.TLSCA != "" {
+			errs = append(errs, errors.New("tls_ca must not be set when socket is used (Unix socket needs no network TLS)"))
+		}
+	} else {
+		if check.Host == "" {
+			errs = append(errs, errors.New("host is required for mysql checks (or set socket for a local Unix socket)"))
+		}
+		if check.TLSCA == "" {
+			errs = append(errs, errors.New("tls_ca is required for TCP mysql connections"))
+		} else if _, err := os.Stat(check.TLSCA); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("tls_ca not accessible: %w", err))
+		}
+		if check.Port < 0 || check.Port > 65535 {
+			errs = append(errs, errors.New("port must be between 1 and 65535 (default 3306)"))
+		}
+	}
+
+	if len(errs) > 0 {
+		return multiError(errs)
+	}
 	return nil
 }
 
@@ -394,7 +464,11 @@ func (e multiError) Error() string {
 	if len(e) == 1 {
 		return e[0].Error()
 	}
-	return fmt.Sprintf("%d errors occurred:\n", len(e))
+	msgs := make([]string, 0, len(e))
+	for _, err := range e {
+		msgs = append(msgs, err.Error())
+	}
+	return fmt.Sprintf("%d errors occurred: %s", len(e), strings.Join(msgs, "; "))
 }
 
 // GetConfigPath returns the default configuration path.

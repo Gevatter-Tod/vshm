@@ -731,3 +731,50 @@ func TestEntriesFromConfig(t *testing.T) {
 		t.Error("inherited timeout >= overridden interval accepted")
 	}
 }
+
+func TestEntriesFromConfigWiresMySQL(t *testing.T) {
+	reg := NewRegistry()
+	if err := reg.Register("mysql", &fakeCheck{typ: "mysql"}); err != nil {
+		t.Fatal(err)
+	}
+	c := &config.Config{Checks: []config.CheckConfig{
+		{Type: "mysql", CheckID: "db", Host: "db.example.org", Port: 3307, Database: "app",
+			CredentialFile: "/etc/vshm/secrets/db.ini", TLSCA: "/etc/ssl/certs/ca.crt", Query: "SELECT 1;"},
+		{Type: "mysql", CheckID: "db-local", Socket: "/run/mysqld/mysqld.sock",
+			CredentialFile: "/etc/vshm/secrets/local.ini", Query: "SELECT 1"},
+	}}
+	got, err := EntriesFromConfig(c, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(got))
+	}
+	sp, ok := got[0].Config.(*Spec)
+	if !ok || sp.MySQL == nil {
+		t.Fatalf("mysql spec not wired: %+v", got[0].Config)
+	}
+	m := sp.MySQL
+	if m.Host != "db.example.org" || m.Port != 3307 || m.Database != "app" ||
+		m.CredentialFile != "/etc/vshm/secrets/db.ini" || m.TLSCA != "/etc/ssl/certs/ca.crt" || m.Query != "SELECT 1;" {
+		t.Errorf("mysql fields wrong: %+v", m)
+	}
+	sp2 := got[1].Config.(*Spec)
+	if sp2.MySQL == nil || sp2.MySQL.Socket != "/run/mysqld/mysqld.sock" || sp2.MySQL.Host != "" || sp2.MySQL.TLSCA != "" {
+		t.Errorf("socket mysql fields wrong: %+v", sp2.MySQL)
+	}
+	// non-mysql specs must have nil MySQL
+	c.Checks = append(c.Checks, config.CheckConfig{Type: "mysql", CheckID: "x"})
+	c.Checks = c.Checks[:2]
+	c.Checks = append([]config.CheckConfig{{Type: "http", CheckID: "h", URL: "https://example.org/"}}, c.Checks...)
+	if err := reg.Register("http", &fakeCheck{typ: "http"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = EntriesFromConfig(c, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Config.(*Spec).MySQL != nil {
+		t.Error("http spec must not carry mysql fields")
+	}
+}

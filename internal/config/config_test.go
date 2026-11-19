@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,4 +89,84 @@ func writeTempConfig(t *testing.T, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestValidateMySQLCheckValid(t *testing.T) {
+	cfg, err := Load(writeTempConfig(t, `
+[agent]
+host_name = "test-host"
+
+[[checks]]
+check_id = "db-readiness"
+type = "mysql"
+host = "db.example.org"
+port = 3306
+database = "app"
+credential_file = "/etc/vshm/secrets/db.ini"
+tls_ca = "/etc/ssl/certs/ca-certificates.crt"
+query = "SELECT 1;"
+
+[[checks]]
+check_id = "db-local"
+type = "mysql"
+socket = "/run/mysqld/mysqld.sock"
+credential_file = "/etc/vshm/secrets/db-local.ini"
+query = "SELECT 1"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("valid mysql config rejected: %v", err)
+	}
+	mc := cfg.Checks[0]
+	if mc.Port != 3306 || mc.Database != "app" || mc.TLSCA == "" || mc.Query != "SELECT 1;" {
+		t.Errorf("mysql fields not parsed: %+v", mc)
+	}
+	if cfg.Checks[1].Socket != "/run/mysqld/mysqld.sock" {
+		t.Errorf("socket not parsed: %+v", cfg.Checks[1])
+	}
+}
+
+func TestValidateMySQLCheckErrors(t *testing.T) {
+	base := `
+[agent]
+host_name = "test-host"
+
+[[checks]]
+check_id = "db"
+type = "mysql"
+%s
+`
+	cases := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{"missing query", `host = "h"` + "\n" + `credential_file = "/etc/vshm/secrets/x.ini"` + "\n" + `tls_ca = "/etc/ssl/certs/ca.crt"`, "query is required"},
+		{"bad query DML", `host = "h"` + "\n" + `credential_file = "/etc/vshm/secrets/x.ini"` + "\n" + `tls_ca = "/etc/ssl/certs/ca.crt"` + "\n" + `query = "DELETE FROM t"`, "invalid query"},
+		{"bad query multi", `host = "h"` + "\n" + `credential_file = "/etc/vshm/secrets/x.ini"` + "\n" + `tls_ca = "/etc/ssl/certs/ca.crt"` + "\n" + `query = "SELECT 1; SELECT 2"`, "invalid query"},
+		{"missing credential_file", `host = "h"` + "\n" + `tls_ca = "/etc/ssl/certs/ca.crt"` + "\n" + `query = "SELECT 1"`, "credential_file is required"},
+		{"missing host and socket", `credential_file = "/etc/vshm/secrets/x.ini"` + "\n" + `tls_ca = "/etc/ssl/certs/ca.crt"` + "\n" + `query = "SELECT 1"`, "host is required"},
+		{"TCP without tls_ca", `host = "h"` + "\n" + `credential_file = "/etc/vshm/secrets/x.ini"` + "\n" + `query = "SELECT 1"`, "tls_ca is required"},
+		{"port out of range", `host = "h"` + "\n" + `port = 70000` + "\n" + `credential_file = "/etc/vshm/secrets/x.ini"` + "\n" + `tls_ca = "/etc/ssl/certs/ca.crt"` + "\n" + `query = "SELECT 1"`, "port must be between"},
+		{"socket not absolute", `socket = "run/mysqld.sock"` + "\n" + `credential_file = "/etc/vshm/secrets/x.ini"` + "\n" + `query = "SELECT 1"`, "socket must be an absolute path"},
+		{"socket plus tls_ca", `socket = "/run/mysqld/mysqld.sock"` + "\n" + `tls_ca = "/etc/ssl/certs/ca.crt"` + "\n" + `credential_file = "/etc/vshm/secrets/x.ini"` + "\n" + `query = "SELECT 1"`, "tls_ca must not be set when socket is used"},
+		{"socket plus host", `socket = "/run/mysqld/mysqld.sock"` + "\n" + `host = "h"` + "\n" + `credential_file = "/etc/vshm/secrets/x.ini"` + "\n" + `query = "SELECT 1"`, "host must not be set when socket is used"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeTempConfig(t, fmt.Sprintf(base, tc.body)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = Validate(cfg)
+			if err == nil {
+				t.Fatalf("expected validation error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
 }
