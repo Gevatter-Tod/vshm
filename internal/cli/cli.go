@@ -3,7 +3,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"time"
@@ -137,9 +140,20 @@ func openStore(ctx context.Context, stateDir string) (*storage.SQLiteStore, erro
 	}
 	store, err := storage.Open(ctx, filepath.Join(stateDir, DBFileName), storage.RealClock{}, storage.Options{})
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return nil, fmt.Errorf("failed to open storage in %s: %w\nstate dir is not writable by user %q; run as the vshm service user (systemd unit) or pass a writable state dir, e.g.: vshm once <config> %s", stateDir, err, currentUser(), filepath.Join(os.TempDir(), "vshm-state"))
+		}
 		return nil, fmt.Errorf("failed to open storage: %w", err)
 	}
 	return store, nil
+}
+
+// currentUser returns the invoking user name for error hints.
+func currentUser() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return os.Getenv("USER")
 }
 
 // Status prints storage status for the given state directory.
