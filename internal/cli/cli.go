@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Gevatter-Tod/vshm/internal/checks/http"
@@ -124,11 +125,46 @@ func RunOnce(ctx context.Context, configPath, stateDir string) error {
 	if err != nil {
 		return err
 	}
-	sched, err := newScheduler(cfg, observer, store, logger)
+	printed := &printingObserver{inner: observer}
+	sched, err := newScheduler(cfg, printed, store, logger)
 	if err != nil {
 		return err
 	}
-	return sched.Once(ctx)
+	if err := sched.Once(ctx); err != nil {
+		return err
+	}
+	fmt.Printf("once: %d checks run, %d failed\n", printed.total, printed.failed)
+	return nil
+}
+
+// printingObserver wraps the incident observer and prints one sanitized line
+// per observation so `vshm once` shows what actually ran. Only the already
+// sanitized reason code (and reason text on failure) is printed; check
+// adapters guarantee these contain no secrets, SQL text or row values.
+type printingObserver struct {
+	inner  scheduler.Observer
+	mu     sync.Mutex
+	total  int
+	failed int
+}
+
+func (p *printingObserver) Observe(ctx context.Context, r model.CheckResult) error {
+	p.mu.Lock()
+	p.total++
+	if !r.Success {
+		p.failed++
+	}
+	p.mu.Unlock()
+	status := "OK  "
+	if !r.Success {
+		status = "FAIL"
+	}
+	line := fmt.Sprintf("check %s (%s): %s reason_code=%s duration=%s", r.CheckID, r.CheckType, status, r.ReasonCode, r.Duration.Round(time.Millisecond))
+	if !r.Success && r.Reason != "" {
+		line += " reason=" + r.Reason
+	}
+	fmt.Println(line)
+	return p.inner.Observe(ctx, r)
 }
 
 // DBFileName is the SQLite database file name inside the state directory.
