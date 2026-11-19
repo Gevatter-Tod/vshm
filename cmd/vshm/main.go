@@ -55,11 +55,14 @@ func main() {
 			os.Exit(1)
 		}
 	case "once":
-		configPath := ""
+		configPath, stateDir := "", ""
 		if len(args) >= 2 {
 			configPath = args[1]
 		}
-		if err := cli.RunOnce(ctx, configPath); err != nil {
+		if len(args) >= 3 {
+			stateDir = args[2]
+		}
+		if err := cli.RunOnce(ctx, configPath, stateDir); err != nil {
 			fmt.Fprintf(os.Stderr, "once: %v\n", err)
 			os.Exit(1)
 		}

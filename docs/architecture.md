@@ -7,7 +7,7 @@ vshm is a single-binary host monitoring agent that runs under systemd. It consis
 - **Storage** (`internal/storage`): SQLite-backed persistence with process locking, schema management, and time-based pruning.
 - **Scheduler** (`internal/scheduler`): Monotonic cadence with four concurrent workers, non-overlapping checks, and deadline enforcement. Adapters own cleanup of their connections/process groups on context cancellation; if cleanup exceeds the 2 s grace the scheduler reports `ErrCleanupTimeout` and the agent exits nonzero. See `docs/wp03-completion.md`.
 - **Check Adapters** (`internal/checks`): Read-only check implementations (systemd, HTTP, ping, MySQL, WebDAV).
-- **Incidents** (`internal/incidents`): Threshold-based incident detection and state transitions.
+- **Incidents** (`internal/incidents`): Per-observation incident state transitions (no thresholds/flap suppression): every failed observation is recorded and enqueues exactly one distinct failure event; the first failure opens the incident, the first later success closes it and enqueues one recovery event; a success without an open incident is silent. Observation + incident transition + event(s) are written in one store transaction. See `docs/wp10-completion.md`.
 - **Reports** (`internal/reports`): Daily report generation with DST-aware scheduling.
 - **Outbox** (`internal/outbox`): Ordered retry queue with expiry and bounded capacity.
 - **Matrix Transport** (`internal/matrixtransport`): Encrypted Matrix event delivery via CLI.

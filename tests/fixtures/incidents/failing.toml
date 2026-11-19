@@ -1,0 +1,17 @@
+# WP-10 runtime-validation fixture: failing local HTTP check (same check_id as
+# healthy.toml, so the incident opened by failing runs is closed by healthy runs).
+# Run: vshm once tests/fixtures/incidents/failing.toml /tmp/vshm-wp10-state
+[agent]
+host_name = "wp10-test"
+interval = "1m"
+timeout = "5s"
+report_time = "09:00"
+room_id = "!wp10test:example.org"
+
+[[checks]]
+check_id = "local-http"
+type = "http"
+url = "http://127.0.0.1:18099/"
+expected_status = 500
+interval = "1m"
+timeout = "5s"

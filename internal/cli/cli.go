@@ -14,6 +14,7 @@ import (
 	"github.com/Gevatter-Tod/vshm/internal/checks/systemd"
 	"github.com/Gevatter-Tod/vshm/internal/checks/webdav"
 	"github.com/Gevatter-Tod/vshm/internal/config"
+	"github.com/Gevatter-Tod/vshm/internal/incidents"
 	"github.com/Gevatter-Tod/vshm/internal/logging"
 	"github.com/Gevatter-Tod/vshm/internal/model"
 	"github.com/Gevatter-Tod/vshm/internal/scheduler"
@@ -58,21 +59,14 @@ func ValidateConfig(ctx context.Context, configPath string) error {
 	return nil
 }
 
-// logObserver prints observations until the incident service (WP-10) is wired in.
-type logObserver struct{ logger *logging.Logger }
-
-func (o logObserver) Observe(_ context.Context, r model.CheckResult) error {
-	status := "FAIL"
-	if r.Success {
-		status = "OK"
-	}
-	o.logger.Printf("observation check=%s type=%s status=%s code=%s duration=%v reason=%q",
-		r.CheckID, r.CheckType, status, r.ReasonCode, r.Duration, logging.Sanitize(r.Reason))
-	return nil
+// newObserver builds the WP-10 incident service that consumes scheduler
+// observations and atomically records observation + incident + outbox events.
+func newObserver(hostName string, store model.Store, logger *logging.Logger) (scheduler.Observer, error) {
+	return incidents.New(hostName, store, storage.RealClock{}, logger)
 }
 
 // newScheduler resolves the configured checks into a scheduler.
-func newScheduler(cfg *config.Config, logger *logging.Logger, pruner scheduler.Pruner) (*scheduler.Scheduler, error) {
+func newScheduler(cfg *config.Config, observer scheduler.Observer, pruner scheduler.Pruner, logger *logging.Logger) (*scheduler.Scheduler, error) {
 	reg := scheduler.NewRegistry()
 	for _, c := range []model.Check{
 		systemd.New(logger), http.New(logger), ping.New(logger), mysql.New(logger), webdav.New(logger),
@@ -87,14 +81,16 @@ func newScheduler(cfg *config.Config, logger *logging.Logger, pruner scheduler.P
 	}
 	return scheduler.New(scheduler.Options{
 		Clock:    storage.RealClock{},
-		Observer: logObserver{logger: logger},
+		Observer: observer,
 		Pruner:   pruner,
 		Logger:   logger,
 	}, entries)
 }
 
 // RunOnce executes every configured check once on the scheduler worker pool.
-func RunOnce(ctx context.Context, configPath string) error {
+// Observations are recorded through the WP-10 incident service into the store
+// at stateDir (default /var/lib/vshm), so incidents and outbox events persist.
+func RunOnce(ctx context.Context, configPath, stateDir string) error {
 	if configPath == "" {
 		configPath = config.GetConfigPath()
 	}
@@ -114,7 +110,18 @@ func RunOnce(ctx context.Context, configPath string) error {
 	fmt.Printf("Host: %s\n", cfg.Agent.HostName)
 	fmt.Printf("Checks: %d\n", len(cfg.Checks))
 
-	sched, err := newScheduler(cfg, logging.New("vshm: "), nil)
+	store, err := openStore(ctx, stateDir)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	logger := logging.New("vshm: ")
+	observer, err := newObserver(cfg.Agent.HostName, store, logger)
+	if err != nil {
+		return err
+	}
+	sched, err := newScheduler(cfg, observer, store, logger)
 	if err != nil {
 		return err
 	}
@@ -187,7 +194,12 @@ func RunAgent(ctx context.Context, configPath, stateDir string) error {
 	}
 	defer store.Close()
 
-	sched, err := newScheduler(cfg, logging.New("vshm: "), store)
+	logger := logging.New("vshm: ")
+	observer, err := newObserver(cfg.Agent.HostName, store, logger)
+	if err != nil {
+		return err
+	}
+	sched, err := newScheduler(cfg, observer, store, logger)
 	if err != nil {
 		return err
 	}

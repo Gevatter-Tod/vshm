@@ -29,6 +29,20 @@ values use explicit units (MiB for bytes, seconds for uptime, two decimals for
 load) and unavailable sources/mounts render as `UNAVAILABLE(<reason>)`, never
 zero or a guessed value.
 
+WP‑10 (incidents) is complete: `internal/incidents` is the scheduler's observer
+and transactionally records each observation together with the per‑check
+incident transition and its outbox event(s) (see `docs/wp10-completion.md`).
+Every failed observation enqueues exactly one distinct failure event (no
+thresholds, no grouping, no confirmation checks); the first failure opens the
+incident keyed by `host_name` + check ID, repeat failures only update
+last‑failure time/reason, the first later success closes the incident and
+enqueues one recovery event carrying the incident start time, and a success
+without an open incident records only. Messages are plain‑text single‑line
+`key=value` (user‑confirmed), with local timestamps rendered with a numeric
+UTC offset, and reason codes/reasons passed through from the observation,
+sanitized to one bounded line. `vshm once`/`vshm run` wire the service to the
+SQLite store, so state survives restarts and downtime alone never transitions.
+
 ## Toolchain (fixed)
 
 - Go **1.27.4**, `CGO_ENABLED=0`, Linux amd64 only.
