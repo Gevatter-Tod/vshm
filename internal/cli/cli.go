@@ -135,10 +135,21 @@ func RunOnce(ctx context.Context, configPath, stateDir string) error {
 const DBFileName = "vshm.db"
 
 func openStore(ctx context.Context, stateDir string) (*storage.SQLiteStore, error) {
-	if stateDir == "" {
+	explicit := stateDir != ""
+	if !explicit {
 		stateDir = config.GetStateDir()
 	}
 	store, err := storage.Open(ctx, filepath.Join(stateDir, DBFileName), storage.RealClock{}, storage.Options{})
+	if err != nil && !explicit && errors.Is(err, os.ErrPermission) {
+		// The deployed service runs as the non-root vshm user, which owns
+		// /var/lib/vshm, so this fallback never triggers there. For manual
+		// runs as any other non-root user, fall back to a per-user state dir.
+		fallback, ferr := userStateDir()
+		if ferr == nil {
+			fmt.Fprintf(os.Stderr, "vshm: %s is not writable by user %q; using per-user state dir %s (pass a state dir argument to choose explicitly)\n", stateDir, currentUser(), fallback)
+			store, err = storage.Open(ctx, filepath.Join(fallback, DBFileName), storage.RealClock{}, storage.Options{})
+		}
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			return nil, fmt.Errorf("failed to open storage in %s: %w\nstate dir is not writable by user %q; run as the vshm service user (systemd unit) or pass a writable state dir, e.g.: vshm once <config> %s", stateDir, err, currentUser(), filepath.Join(os.TempDir(), "vshm-state"))
@@ -146,6 +157,20 @@ func openStore(ctx context.Context, stateDir string) (*storage.SQLiteStore, erro
 		return nil, fmt.Errorf("failed to open storage: %w", err)
 	}
 	return store, nil
+}
+
+// userStateDir returns the per-user state directory used when the system
+// default (/var/lib/vshm) is not writable by the invoking user:
+// $XDG_STATE_HOME/vshm, or ~/.local/state/vshm.
+func userStateDir() (string, error) {
+	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
+		return filepath.Join(xdg, "vshm"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state", "vshm"), nil
 }
 
 // currentUser returns the invoking user name for error hints.

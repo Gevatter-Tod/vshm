@@ -115,6 +115,26 @@ sqlite3 /var/lib/vshm/vshm.db
 sudo -u vshm /usr/bin/vshm
 ```
 
+### Manual Run as a Non-Service User (non-root)
+
+The deployed agent runs as the dedicated non-root `vshm:vshm` account and
+uses `/var/lib/vshm` (created at install time, owned `vshm:vshm` 0700 — see
+`docs/vshm-spec.md` §6). Any other non-root user cannot write there; in that
+case `vshm` automatically falls back to a per-user state dir
+(`$XDG_STATE_HOME/vshm`, default `~/.local/state/vshm`, mode 0700) and prints
+a notice. You can also choose explicitly:
+
+```bash
+./vshm once                          # falls back to ~/.local/state/vshm if needed
+./vshm once /etc/vshm/vshm.toml /tmp/vshm-state
+./vshm status /tmp/vshm-state
+```
+
+Note the config file `/etc/vshm/vshm.toml` is `root:vshm` 0640, so a non-root
+user must be in the `vshm` group (or pass a readable copy as the config
+argument). Each state dir has its own SQLite database — don't mix them if you
+need continuous incident history.
+
 ## Maintenance
 
 ### Update
