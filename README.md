@@ -45,7 +45,7 @@ SQLite store, so state survives restarts and downtime alone never transitions.
 
 ## Toolchain (fixed)
 
-- Go **1.27.4**, `CGO_ENABLED=0`, Linux amd64 only.
+- Go **1.27.3**, `CGO_ENABLED=0`, Linux amd64 only.
 - Pinned: `github.com/BurntSushi/toml v1.6.0`, `github.com/go-sql-driver/mysql v1.10.1`,
   `modernc.org/sqlite v1.61.1` (pure Go).
 
