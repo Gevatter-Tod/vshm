@@ -31,6 +31,15 @@ type Spec struct {
 	Target string
 	// MySQL-specific fields (nil unless Typ == "mysql")
 	MySQL *MySQLSpec
+	// WebDAV-specific fields (nil unless Typ == "webdav")
+	WebDAV *WebDAVSpec
+}
+
+// WebDAVSpec carries the typed WebDAV check fields into the webdav adapter.
+type WebDAVSpec struct {
+	URL            string
+	Depth          int    // exactly 0 or 1; always sent as the Depth header, never unbounded
+	CredentialFile string // INI [basic] file; only permitted with an https URL
 }
 
 // MySQLSpec carries the typed MySQL check fields into the mysql adapter.
@@ -141,10 +150,18 @@ func EntriesFromConfig(cfg *config.Config, reg model.Registry) ([]Entry, error) 
 				Query:          c.Query,
 			}
 		}
+		var dav *WebDAVSpec
+		if c.Type == "webdav" {
+			dav = &WebDAVSpec{
+				URL:            c.URL,
+				Depth:          c.Depth,
+				CredentialFile: c.CredentialFile,
+			}
+		}
 
 		entries = append(entries, Entry{
 			Check:    adapter,
-			Config:   &Spec{ID: c.CheckID, Typ: c.Type, URL: httpFields.url, ExpectedStatus: httpFields.expectedStatus, BodyContains: httpFields.bodyContains, CredentialFile: httpFields.credentialFile, Target: target, MySQL: mys},
+			Config:   &Spec{ID: c.CheckID, Typ: c.Type, URL: httpFields.url, ExpectedStatus: httpFields.expectedStatus, BodyContains: httpFields.bodyContains, CredentialFile: httpFields.credentialFile, Target: target, MySQL: mys, WebDAV: dav},
 			Interval: iv,
 			Timeout:  to,
 		})

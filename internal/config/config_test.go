@@ -170,3 +170,71 @@ type = "mysql"
 		})
 	}
 }
+
+func TestValidateWebDAVCheckValid(t *testing.T) {
+	cfg, err := Load(writeTempConfig(t, `
+[agent]
+host_name = "test-host"
+
+[[checks]]
+check_id = "dav-https"
+type = "webdav"
+url = "https://dav.example.org/dav"
+depth = 1
+credential_file = "/etc/vshm/secrets/webdav.ini"
+
+[[checks]]
+check_id = "dav-http-plain"
+type = "webdav"
+url = "http://127.0.0.1:8080/dav"
+depth = 0
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("valid webdav config rejected: %v", err)
+	}
+	if cfg.Checks[0].Depth != 1 || cfg.Checks[1].Depth != 0 {
+		t.Errorf("depth not parsed: %+v / %+v", cfg.Checks[0], cfg.Checks[1])
+	}
+}
+
+func TestValidateWebDAVCheckErrors(t *testing.T) {
+	base := `
+[agent]
+host_name = "test-host"
+
+[[checks]]
+check_id = "dav"
+type = "webdav"
+%s
+`
+	cases := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{"missing url", `depth = 1`, "url is required for webdav checks"},
+		{"bad scheme", `url = "ftp://example.com/dav"` + "\n" + `depth = 1`, "scheme must be http or https"},
+		{"relative url", `url = "/dav"` + "\n" + `depth = 1`, "valid absolute"},
+		{"depth 2", `url = "https://example.com/dav"` + "\n" + `depth = 2`, "depth must be 0 or 1"},
+		{"depth -1", `url = "https://example.com/dav"` + "\n" + `depth = -1`, "depth must be 0 or 1"},
+		{"credentials over http", `url = "http://example.com/dav"` + "\n" + `depth = 1` + "\n" + `credential_file = "/etc/vshm/secrets/webdav.ini"`, "only permitted with HTTPS"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeTempConfig(t, fmt.Sprintf(base, tc.body)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = Validate(cfg)
+			if err == nil {
+				t.Fatalf("expected validation error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -58,6 +59,8 @@ type CheckConfig struct {
 	Database string `toml:"database,omitempty"`
 	TLSCA    string `toml:"tls_ca,omitempty"`
 	Query    string `toml:"query,omitempty"`
+	// WebDAV-specific fields (url and credential_file are shared with http)
+	Depth int `toml:"depth,omitempty"`
 }
 
 // CheckType represents the type of check.
@@ -344,6 +347,13 @@ func validateChecks(checks []CheckConfig) error {
 				errs = append(errs, fmt.Errorf("checks[%d]: %w", i, err))
 			}
 		}
+
+		// Validate WebDAV-specific fields
+		if check.Type == "webdav" {
+			if err := validateWebDAVCheck(check); err != nil {
+				errs = append(errs, fmt.Errorf("checks[%d]: %w", i, err))
+			}
+		}
 	}
 
 	if len(errs) > 0 {
@@ -398,6 +408,44 @@ func validateMySQLCheck(check CheckConfig) error {
 		}
 		if check.Port < 0 || check.Port > 65535 {
 			errs = append(errs, errors.New("port must be between 1 and 65535 (default 3306)"))
+		}
+	}
+
+	if len(errs) > 0 {
+		return multiError(errs)
+	}
+	return nil
+}
+
+// validateWebDAVCheck validates the WebDAV check schema (docs/wp08-check-webdav.md §5):
+// url required with http/https scheme, depth exactly 0 or 1 (the Depth header is
+// always sent, never unbounded), and an optional credential_file that is only
+// permitted over HTTPS (Basic credentials are never sent over plain HTTP) and is
+// subject to the shared secret-file rules.
+func validateWebDAVCheck(check CheckConfig) error {
+	var errs []error
+
+	if check.URL == "" {
+		errs = append(errs, errors.New("url is required for webdav checks"))
+	} else if u, err := url.Parse(check.URL); err != nil || u.Host == "" {
+		errs = append(errs, errors.New("url must be a valid absolute http(s) URL for webdav checks"))
+	} else {
+		scheme := strings.ToLower(u.Scheme)
+		if scheme != "http" && scheme != "https" {
+			errs = append(errs, errors.New("url scheme must be http or https for webdav checks"))
+		}
+		if check.CredentialFile != "" && scheme != "https" {
+			errs = append(errs, errors.New("credential_file is only permitted with HTTPS (verified TLS) for webdav checks"))
+		}
+	}
+
+	if check.Depth != 0 && check.Depth != 1 {
+		errs = append(errs, errors.New("depth must be 0 or 1 for webdav checks"))
+	}
+
+	if check.CredentialFile != "" {
+		if err := validateSecretFile(check.CredentialFile); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
