@@ -21,6 +21,7 @@ import (
 	"github.com/Gevatter-Tod/vshm/internal/incidents"
 	"github.com/Gevatter-Tod/vshm/internal/logging"
 	"github.com/Gevatter-Tod/vshm/internal/model"
+	"github.com/Gevatter-Tod/vshm/internal/reports"
 	"github.com/Gevatter-Tod/vshm/internal/scheduler"
 	"github.com/Gevatter-Tod/vshm/internal/storage"
 )
@@ -155,15 +156,9 @@ func (p *printingObserver) Observe(ctx context.Context, r model.CheckResult) err
 		p.failed++
 	}
 	p.mu.Unlock()
-	status := "OK  "
-	if !r.Success {
-		status = "FAIL"
-	}
-	line := fmt.Sprintf("check %s (%s): %s reason_code=%s duration=%s", r.CheckID, r.CheckType, status, r.ReasonCode, r.Duration.Round(time.Millisecond))
-	if !r.Success && r.Reason != "" {
-		line += " reason=" + r.Reason
-	}
-	fmt.Println(line)
+	// Same line format as the daily report (shared formatter): leading status
+	// emoticon, age, reason_code, optional sanitized reason; no duration field.
+	fmt.Println(reports.FormatCheckLine(r.CheckID, r.CheckType, r.Success, false, time.Since(r.CompletedAt), r.ReasonCode, r.Reason))
 	return p.inner.Observe(ctx, r)
 }
 

@@ -38,16 +38,30 @@ This package consumes WP-00 `CheckResult`, `Clock`, `Store`, `Transport`, `Notif
 `internal/reports/`; `internal/metrics/`; WP-00 store/model signatures; tests/fixtures.
 
 ## 5 Requirements (self-contained, from spec)
-Fixed configurable local HH:MM default 09:00; no timezone config. At most one report per local calendar date. At scheduled instant insert unique local-date key and its report outbox event in one transaction, key before event, commit both/neither. At startup schedule only next future report; omit downtime-missed report/no catchup. DST gap => first valid local instant after gap; fold => first occurrence. Key prevents duplicates on restart, clock adjustment, DST transition. Report is a separate daily plain-text message; snapshot resource metrics at render time. Include every configured check’s latest status, last observation time and age, short sanitized outcome/reason, and resource metrics; `NO RESULT` before any run. Mark `STALE` when age > that check’s interval + timeout, retain observation timestamp. Include host-local report timestamp numeric UTC offset. Missing metric UNAVAILABLE, not zero. Report-date key remains even if event later evicted; no regeneration.
+Fixed configurable local HH:MM default 09:00; no timezone config. At most one report per local calendar date. At scheduled instant insert unique local-date key and its report outbox event in one transaction, key before event, commit both/neither. At startup schedule only next future report; omit downtime-missed report/no catchup. DST gap => first valid local instant after gap; fold => first occurrence. Key prevents duplicates on restart, clock adjustment, DST transition. Report is a separate daily plain-text message; snapshot resource metrics at render time. Include every configured check’s latest status (emoticon), age since the last observation, short sanitized outcome/reason, and resource metrics; `NO RESULT` before any run. Mark `STALE` (⌛) when age > that check’s interval + timeout. The report header is the only line with a date/time (host-local `DD.MM.YYYY HH:MM:SS`, no offset); no other line carries a timestamp. Missing metric UNAVAILABLE, not zero. Report-date key remains even if event later evicted; no regeneration.
+
+Report text format (user-confirmed, supersedes the numeric-offset wording above): plain text, metrics block first, then one line per configured check. The header line is the only line carrying a date/time: host-local `DD.MM.YYYY HH:MM:SS` with no UTC offset; check lines and the metrics block carry no timestamps (checks show only `age`). Each check line starts with a status emoticon — ✅ success, ❌ failure, ❓ with `NO RESULT` before any run — and carries ⌛ when STALE (age > that check's interval + timeout). Example:
+
+```
+daily report host=my-server at=20.11.2026 22:46:31
+metrics:
+  load1=0.10 load5=0.11 load15=0.09
+  ...
+✅ check systemd-check (systemd): age=1s reason_code=success reason=...
+❌⌛ check http-check (http): age=1d0h0m0s reason_code=http_status reason=HTTP 503
+❓ check ping-check (ping): NO RESULT
+```
 
 ## 6 Design decisions already fixed
 Use local calendar and explicit DST gap/fold resolution; storage snapshot is short-lived consistent snapshot, close promptly; enqueue within same transaction with report key.
 
-## 7 Open questions — "ASK THE USER before implementing"
-**ASK THE USER before implementing**: report exact text/order/format is absent (proposed — confirm with user); confirm stable local-date key representation if schema not approved. DST behavior is normative, but ask if host timezone database assumptions require documenting.
+## 7 Open questions — asked and answered by the user
+- **Report text/order/format**: decided — metrics block before check lines; host-local `DD.MM.YYYY HH:MM:SS` timestamps without UTC offset (overrides the "numeric UTC offset" wording in §5/§8); status as leading emoticon (✅/❌/❓ NO RESULT), ⌛ appended when STALE. See §5 for the full example.
+- **Local-date key representation**: confirmed — local calendar date in `2006-01-02` form as the outbox dedupe key.
+- **Timezone database**: schedules and rendered timestamps rely on the host's local timezone data (`time.Local`); no timezone config exists.
 
 ## 8 Acceptance tests (from spec §8 where applicable, plus package-specific)
-§8 report fields/NO RESULT/STALE/unavailable/numeric offset/DST gap-fold/one date/restart dedup/no catchup. Test fake clock and zones, gap/fold, clock movement, downtime, transactional rollback and eviction keeps date key.
+§8 report fields/NO RESULT/STALE/unavailable/DD.MM.YYYY local timestamps/emoticon status/DST gap-fold/one date/restart dedup/no catchup. Test fake clock and zones, gap/fold, clock movement, downtime, transactional rollback and eviction keeps date key.
 
 ## 9 Definition of done (reference the common DoD in overview.md plus package-specific runtime validation steps)
 Complete all eight items in the common Definition of Done in `overview.md`, including evidence and completion report. Package runtime validation: Run deterministic timezone tests; render preview from fixture SQLite/metrics, run `vshm run` across simulated due time and inspect fake outbox (no Matrix necessary).

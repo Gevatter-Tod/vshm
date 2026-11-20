@@ -434,8 +434,9 @@ func FormatUptime(d time.Duration) string {
 // units. Unavailable metrics render as UNAVAILABLE(<reason>), never zero.
 func Render(s Snapshot) string {
 	var sb strings.Builder
+	// User-confirmed report display: the report header carries the only
+	// date/time, so the metrics block renders no collected_at line.
 	sb.WriteString("metrics:\n")
-	sb.WriteString("  collected_at=" + s.CollectedAt.UTC().Format(time.RFC3339) + "\n")
 
 	if s.Load.Available {
 		sb.WriteString(fmt.Sprintf("  load1=%s load5=%s load15=%s\n",

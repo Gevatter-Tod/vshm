@@ -43,6 +43,14 @@ UTC offset, and reason codes/reasons passed through from the observation,
 sanitized to one bounded line. `vshm once`/`vshm run` wire the service to the
 SQLite store, so state survives restarts and downtime alone never transitions.
 
+WP‑11 (daily report) is complete: `internal/reports` renders the daily plain‑text
+report (metrics first, then one line per configured check with a leading status
+emoticon ✅/❌/❓ and ⌛ when stale; the header carries the only date/time as
+host‑local `DD.MM.YYYY HH:MM:SS`) and enqueues it transactionally under a unique
+local‑date key, with DST gap/fold‑aware scheduling at a fixed local `HH:MM`
+(default 09:00), next‑future‑only scheduling and no catch‑up (see
+`docs/wp11-completion.md`).
+
 ## Toolchain (fixed)
 
 - Go **1.27.3**, `CGO_ENABLED=0`, Linux amd64 only.

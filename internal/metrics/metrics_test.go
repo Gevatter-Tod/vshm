@@ -353,7 +353,6 @@ func TestRenderFullSnapshot(t *testing.T) {
 
 	wants := []string{
 		"metrics:",
-		"collected_at=2026-11-05T09:00:00Z",
 		"load1=1.23 load5=0.99 load15=0.77",
 		"mem_total=16384.0 MiB mem_available=4096.0 MiB mem_used=12288.0 MiB",
 		"mount /: total=204800.0 MiB available=61440.0 MiB used=122880.0 MiB",
@@ -367,16 +366,17 @@ func TestRenderFullSnapshot(t *testing.T) {
 	}
 }
 
-func TestRenderCollectedAtIsUTC(t *testing.T) {
-	loc := time.FixedZone("UTC+2", 2*3600)
-	local := time.Date(2026, 11, 5, 11, 0, 0, 0, loc)
+func TestRenderOmitsCollectedAt(t *testing.T) {
+	local := time.Date(2026, 11, 5, 11, 0, 0, 0, time.FixedZone("UTC+2", 2*3600))
 	c := New(okProc(), okStatvfs())
 	snap := c.Collect(context.Background(), nil, local)
+	// The stored instant stays UTC; the rendered report shows no timestamp at all
+	// (the daily report header carries the only date/time).
 	if snap.CollectedAt.Location() != time.UTC || !snap.CollectedAt.Equal(local) {
 		t.Errorf("CollectedAt = %v, want UTC instant %v", snap.CollectedAt, local.UTC())
 	}
-	if !strings.Contains(Render(snap), "collected_at=2026-11-05T09:00:00Z") {
-		t.Errorf("render must show UTC instant:\n%s", Render(snap))
+	if strings.Contains(Render(snap), "collected_at") {
+		t.Errorf("render must not contain a collected_at line:\n%s", Render(snap))
 	}
 }
 
