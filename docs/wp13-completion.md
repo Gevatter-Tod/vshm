@@ -98,6 +98,37 @@ specified in `docs/wp13-cli-deployment.md` and `docs/vshm-spec.md` §6–§8.
       signature changed)
 - [x] 8. This completion report
 
+## Addendum — startup delivery behavior (user-confirmed after initial implementation)
+
+The user clarified the expected `vshm run` behavior: all checks execute right
+away, and once that pass is done the report (and any failure messages) are sent
+via Matrix immediately rather than at the next 30 s outbox tick. Changes:
+
+- `internal/outbox`: `Manager.Flush(ctx)` processes one pending batch on demand
+  (mutex-guarded, coalesces with the loop); `runLoop` now also processes one
+  batch immediately at start, so events pending before a restart are retried
+  promptly.
+- `internal/reports`: exported `ReportNow(ctx)` (idempotent per local date via
+  the dedupe key).
+- `internal/cli`: `passObserver` wraps the incident observer — after every
+  recorded observation it fires an async outbox flush (spec §1 "alert
+  immediately after the observation completes"), and it closes a `startupDone`
+  channel once every configured check has produced its startup observation.
+  `RunAgent` then calls `ReportNow` + `Flush` (first report sent immediately
+  after the startup pass; afterwards `Schedule` = next-future-only, no catch-up)
+  and `RunOnce` flushes pending events before exiting. `RunAgent`/`RunOnce`
+  accept a `WithTransportFactory` option so tests inject a fake transport.
+- Spec updated: `docs/vshm-spec.md` §6 (`once`/`run` semantics) and §5
+  (user-confirmed exception: first report at startup after the prompt pass,
+  date key still prevents duplicates).
+- Evidence: `internal/cli/cli_test.go` (RunOnce sends the failure message when
+  the pass is done and marks it delivered; fail-closed transport keeps it
+  pending; RunAgent sends the startup report after the first pass),
+  `internal/outbox` `TestFlushDeliversPendingImmediately`, plus a live 40 s
+  `vshm run` showing the failure event and `report-<date>` enqueued+flushed
+  immediately after the startup pass (sends fail closed here because the
+  sandbox Matrix account is not logged in; on a validated host they succeed).
+
 ## Known limitations
 
 1. Real Matrix `test-matrix` send not exercised here — requires operator

@@ -636,3 +636,36 @@ var _ model.Clock = (*fakeClock)(nil)
 // which differs from model.Notifier's Enqueue(context.Context, []model.OutboxEvent) error
 // This is intentional - Manager is not a Notifier, it's a delivery manager
 // We verify the Manager implements its own Enqueue method separately
+
+func TestFlushDeliversPendingImmediately(t *testing.T) {
+	store := newFakeStore()
+	now := time.Now()
+	store.events["ev1"] = model.OutboxEvent{
+		ID:            "ev1",
+		Kind:          "event",
+		DeliveryState: model.StatePending,
+		EnqueuedAt:    now.Add(-time.Second),
+		NextAttemptAt: now.Add(-time.Second),
+		ExpiresAt:     now.Add(24 * time.Hour),
+	}
+	tr := newFakeTransport()
+	m := New(store, tr, nil, nil, Config{})
+
+	// No Start(): Flush must deliver a due pending event on its own.
+	m.Flush(context.Background())
+
+	tr.mu.Lock()
+	sends := len(tr.sendCalls)
+	tr.mu.Unlock()
+	if sends != 1 {
+		t.Fatalf("want 1 send, got %d", sends)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.markCalls) != 1 || store.markCalls[0].outcome != model.DeliverySuccess {
+		t.Fatalf("want one success mark, got %+v", store.markCalls)
+	}
+	if store.events["ev1"].DeliveryState != model.StateDelivered {
+		t.Fatalf("want delivered state, got %s", store.events["ev1"].DeliveryState)
+	}
+}

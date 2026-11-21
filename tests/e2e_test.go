@@ -7,6 +7,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,9 +18,30 @@ import (
 	"time"
 
 	"github.com/Gevatter-Tod/vshm/internal/cli"
+	"github.com/Gevatter-Tod/vshm/internal/logging"
 	"github.com/Gevatter-Tod/vshm/internal/model"
 	"github.com/Gevatter-Tod/vshm/internal/storage"
 )
+
+// failClosedTransport is a fake transport that never sends (delivery blocked,
+// e.g. Matrix not validated on this host), so e2e tests never touch the real
+// matrix CLI or the network.
+type failClosedTransport struct{}
+
+func (failClosedTransport) Validate(ctx context.Context) (model.Compatibility, error) {
+	return model.Compatibility{Compatible: false, Reason: "not validated"}, nil
+}
+
+func (failClosedTransport) Send(ctx context.Context, ev model.OutboxEvent) (model.DeliveryOutcome, error) {
+	return model.DeliveryFailure, errors.New("delivery blocked: transport not validated")
+}
+
+// blockedOpt injects the fail-closed fake transport into cli run/once.
+func blockedOpt() cli.Option {
+	return cli.WithTransportFactory(func(roomID string, logger *logging.Logger) (model.Transport, error) {
+		return failClosedTransport{}, nil
+	})
+}
 
 // writeConfig writes a TOML config with two http checks: okURL must return 200,
 // failURL is expected to fail (server status is controlled by the test).
@@ -92,7 +114,7 @@ func TestRunOnceEndToEnd(t *testing.T) {
 
 	// First pass: ok-http succeeds (silent), fail-http fails -> one failure
 	// event + open incident.
-	if err := cli.RunOnce(ctx, cfgPath, stateDir); err != nil {
+	if err := cli.RunOnce(ctx, cfgPath, stateDir, blockedOpt()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	store := openStore(t, ctx, stateDir)
@@ -118,7 +140,7 @@ func TestRunOnceEndToEnd(t *testing.T) {
 	// Second pass with the target healthy: success after failure -> exactly
 	// one recovery event, incident closed.
 	failStatus.Store(http.StatusOK)
-	if err := cli.RunOnce(ctx, cfgPath, stateDir); err != nil {
+	if err := cli.RunOnce(ctx, cfgPath, stateDir, blockedOpt()); err != nil {
 		t.Fatalf("RunOnce (recovery): %v", err)
 	}
 	store = openStore(t, ctx, stateDir)
@@ -222,7 +244,7 @@ timeout = "5s"
 		time.Sleep(3 * time.Second)
 		cancel()
 	}()
-	if err := cli.RunAgent(ctx, cfgPath, stateDir); err != nil {
+	if err := cli.RunAgent(ctx, cfgPath, stateDir, blockedOpt()); err != nil {
 		t.Fatalf("RunAgent: %v", err)
 	}
 
@@ -276,7 +298,7 @@ timeout = "5s"
 		t.Fatal(err)
 	}
 
-	err := cli.RunAgent(ctx, cfgPath, stateDir)
+	err := cli.RunAgent(ctx, cfgPath, stateDir, blockedOpt())
 	if err == nil {
 		t.Fatal("want second instance to be refused")
 	}

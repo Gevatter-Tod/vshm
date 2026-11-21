@@ -12,10 +12,10 @@ v1 scope: Linux amd64 with systemd only. The agent is a single C-free binary at
 | `vshm validate-config [config]` | schema/values/duplicate-ID/range/path/secret-permission validation; no network, no send | 0 ok / 1 invalid |
 | `vshm validate-matrix [cli] [config] [room]` | non-sending Matrix compatibility check | 0 compatible / 1 blocked |
 | `vshm check [ID] [config]` | run the named check, or all checks when ID is omitted, once with the configured timeout; **no incident state change, no send**, nothing persisted | 0 all passed / 1 any failed or unknown ID |
-| `vshm once [config] [stateDir]` | single full monitoring pass: every check exactly once on the worker pool, observations recorded through the incident/outbox pipeline (persisted), one sanitized line per check plus a summary | 0 run / 1 infrastructure error |
+| `vshm once [config] [stateDir]` | single full monitoring pass: every check exactly once on the worker pool, observations recorded through the incident/outbox pipeline (persisted), one sanitized line per check plus a summary; when the pass is done, pending events are delivered immediately (fail-closed if Matrix not validated) | 0 run / 1 infrastructure error |
 | `vshm status [stateDir]` | last observations/ages, incidents, pending/delivery/discard counts and reasons, storage fault, DB health | 0 / 1 |
-| `vshm test-matrix [cli] [room] [message]` | the **only** command that sends — an explicit encrypted test message | 0 sent / 1 failed |
-| `vshm run [config] [stateDir]` | the agent in foreground: scheduler + daily reports + outbox delivery; what systemd runs | 0 on clean shutdown / nonzero on error or cleanup failure |
+| `vshm test-matrix [cli] [room] [message]` | the **only** command that sends an explicit test message | 0 sent / 1 failed |
+| `vshm run [config] [stateDir]` | the agent in foreground (what systemd runs): all checks run promptly at startup; failure/recovery messages are sent as soon as they are recorded; the current-date report is sent via Matrix right after the startup pass (date key prevents duplicates); afterwards checks/reports follow the configured schedule | 0 on clean shutdown / nonzero on error or cleanup failure |
 
 Errors are nonzero and sanitized (no secrets, SQL text, or row values in output).
 Default paths: config `/etc/vshm/vshm.toml`, state `/var/lib/vshm`.

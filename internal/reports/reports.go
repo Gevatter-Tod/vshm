@@ -238,6 +238,12 @@ func (s *Service) Schedule(ctx context.Context) error {
 	}
 }
 
+// ReportNow renders and enqueues the report for the current local date
+// immediately (used once at agent startup, right after the prompt first check
+// pass). The unique local-date key makes this idempotent: if today's report
+// already exists, no new event is enqueued.
+func (s *Service) ReportNow(ctx context.Context) error { return s.runReport(ctx) }
+
 // runReport renders and transactionally enqueues the report for the current
 // local date. The date key prevents duplicates on restart, clock adjustment or
 // DST transitions; if the key already exists no new event is enqueued.

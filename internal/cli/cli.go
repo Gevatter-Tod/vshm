@@ -113,7 +113,10 @@ func newSchedulerFromEntries(entries []scheduler.Entry, observer scheduler.Obser
 // RunOnce executes every configured check once on the scheduler worker pool.
 // Observations are recorded through the WP-10 incident service into the store
 // at stateDir (default /var/lib/vshm), so incidents and outbox events persist.
-func RunOnce(ctx context.Context, configPath, stateDir string) error {
+// When the pass is done, pending events are delivered immediately (fail-closed
+// if the transport is not validated).
+func RunOnce(ctx context.Context, configPath, stateDir string, opts ...Option) error {
+	o := resolveOptions(opts)
 	if configPath == "" {
 		configPath = config.GetConfigPath()
 	}
@@ -153,6 +156,15 @@ func RunOnce(ctx context.Context, configPath, stateDir string) error {
 		return err
 	}
 	fmt.Printf("once: %d checks run, %d failed\n", printed.total, printed.failed)
+
+	// The pass is done: deliver the pending events (failure/recovery messages)
+	// now. Fail-closed: if the Matrix transport is not validated on this host,
+	// nothing is sent and the events stay pending.
+	transport, err := o.transportFactory(cfg.Agent.RoomID, logger)
+	if err != nil {
+		return err
+	}
+	outbox.New(store, transport, storage.RealClock{}, logger, outbox.Config{}).Flush(ctx)
 	return nil
 }
 
@@ -239,6 +251,74 @@ func RunCheck(ctx context.Context, checkID, configPath string) error {
 	return nil
 }
 
+// runOptions carries optional seams for RunAgent/RunOnce.
+type runOptions struct {
+	transportFactory func(roomID string, logger *logging.Logger) (model.Transport, error)
+}
+
+// Option customizes RunAgent/RunOnce.
+type Option func(*runOptions)
+
+// WithTransportFactory overrides the Matrix transport factory (used by tests
+// to inject a fake; production default is the fail-closed Matrix CLI transport,
+// which sends nothing until validated on the host).
+func WithTransportFactory(f func(roomID string, logger *logging.Logger) (model.Transport, error)) Option {
+	return func(o *runOptions) { o.transportFactory = f }
+}
+
+// defaultTransportFactory builds the production Matrix CLI transport.
+func defaultTransportFactory(roomID string, logger *logging.Logger) (model.Transport, error) {
+	return matrixtransport.New(matrixtransport.Config{RoomID: roomID, Logger: logger})
+}
+
+func resolveOptions(opts []Option) runOptions {
+	o := runOptions{transportFactory: defaultTransportFactory}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+// passObserver wraps the incident observer with two behaviors:
+//   - after every recorded observation it triggers an immediate outbox flush,
+//     so failure/recovery messages are sent as soon as they are recorded
+//     (spec §1: alert immediately after the observation completes) instead of
+//     waiting for the next delivery tick;
+//   - it closes done once `want` observations have been recorded, i.e. when the
+//     prompt startup pass of all configured checks has finished.
+type passObserver struct {
+	inner scheduler.Observer
+	ob    *outbox.Manager
+	ctx   context.Context
+	want  int
+	done  chan struct{}
+	once  sync.Once
+	mu    sync.Mutex
+	count int
+}
+
+func (p *passObserver) Observe(ctx context.Context, r model.CheckResult) error {
+	err := p.inner.Observe(ctx, r)
+	if p.ob != nil {
+		go p.ob.Flush(p.ctx) // async: never block a scheduler worker on a send
+	}
+	p.mu.Lock()
+	p.count++
+	hit := p.count >= p.want
+	p.mu.Unlock()
+	if hit {
+		p.once.Do(func() { close(p.done) })
+	}
+	return err
+}
+
+// markDoneIfNoChecks closes done immediately when no checks are configured.
+func (p *passObserver) markDoneIfNoChecks() {
+	if p.want == 0 {
+		p.once.Do(func() { close(p.done) })
+	}
+}
+
 // DBFileName is the SQLite database file name inside the state directory.
 const DBFileName = "vshm.db"
 
@@ -323,11 +403,15 @@ func Status(ctx context.Context, stateDir string) error {
 // RunAgent validates the configuration, takes the state-directory lock and runs
 // the full agent until ctx is cancelled: the check scheduler (WP-03), the daily
 // report scheduler (WP-11) and the outbox delivery loop (WP-12) on the Matrix
-// transport. A Matrix compatibility failure blocks sending only — the
-// transport fails closed and monitoring/persistence continue. A cleanup
-// failure in the scheduler is returned as an error so the process exits
-// nonzero and systemd restarts it.
-func RunAgent(ctx context.Context, configPath, stateDir string) error {
+// transport. Every check runs promptly at startup; failure/recovery events are
+// flushed to the outbox as soon as they are recorded, and once the startup pass
+// completes, the current-date report is sent immediately before the configured
+// report schedule takes over (next future time only, no catch-up). A Matrix
+// compatibility failure blocks sending only — the transport fails closed and
+// monitoring/persistence continue. A cleanup failure in the scheduler is
+// returned as an error so the process exits nonzero and systemd restarts it.
+func RunAgent(ctx context.Context, configPath, stateDir string, opts ...Option) error {
+	o := resolveOptions(opts)
 	if configPath == "" {
 		configPath = config.GetConfigPath()
 	}
@@ -351,20 +435,57 @@ func RunAgent(ctx context.Context, configPath, stateDir string) error {
 	defer store.Close()
 
 	logger := logging.New("vshm: ")
-	observer, err := newObserver(cfg.Agent.HostName, store, logger)
-	if err != nil {
-		return err
-	}
 	entries, err := buildEntries(cfg, logger)
 	if err != nil {
 		return err
 	}
+
+	// Matrix transport (WP-12). Delivery is fail-closed: Send validates lazily
+	// and refuses to send while the transport is not compatible, so a Matrix
+	// validation failure blocks sending only — monitoring and persistence
+	// continue (spec §5) and startup is never delayed by Matrix. Validate once
+	// asynchronously purely for an early journal signal; it is not a startup
+	// prerequisite.
+	transport, err := o.transportFactory(cfg.Agent.RoomID, logger)
+	if err != nil {
+		return fmt.Errorf("failed to create matrix transport: %w", err)
+	}
+	go func() {
+		vctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		compat, verr := transport.Validate(vctx)
+		switch {
+		case verr != nil:
+			logger.Printf("matrix validation failed (delivery blocked, monitoring continues)")
+		case !compat.Compatible:
+			logger.Printf("matrix transport not compatible (delivery blocked, monitoring continues): %s", compat.Reason)
+		default:
+			logger.Printf("matrix transport validated")
+		}
+	}()
+
+	// Outbox delivery loop (WP-12): one immediate batch at start (pending
+	// events from before a restart are retried promptly), then every delivery
+	// interval; ordered durable retries while pending.
+	ob := outbox.New(store, transport, storage.RealClock{}, logger, outbox.Config{})
+	if err := ob.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start outbox delivery: %w", err)
+	}
+	defer ob.Stop()
+
+	base, err := newObserver(cfg.Agent.HostName, store, logger)
+	if err != nil {
+		return err
+	}
+	startupDone := make(chan struct{})
+	observer := &passObserver{inner: base, ob: ob, ctx: ctx, want: len(entries), done: startupDone}
+	observer.markDoneIfNoChecks()
 	sched, err := newSchedulerFromEntries(entries, observer, store, logger)
 	if err != nil {
 		return err
 	}
 
-	// Daily report scheduler (WP-11): next-future-only, DST-aware, no catch-up.
+	// Daily report service (WP-11).
 	limits := make([]reports.CheckLimit, 0, len(entries))
 	for _, e := range entries {
 		limits = append(limits, reports.CheckLimit{
@@ -379,41 +500,22 @@ func RunAgent(ctx context.Context, configPath, stateDir string) error {
 		return fmt.Errorf("failed to create report service: %w", err)
 	}
 	go func() {
+		// Startup behavior (user-confirmed): the scheduler runs every check
+		// promptly at startup; once that first pass has completed, the report
+		// for the current local date is rendered, enqueued and sent right away
+		// (the unique date key still prevents duplicates on restart). After the
+		// first report, scheduling follows the configuration: next future
+		// report time only, DST-aware, no catch-up.
+		<-startupDone
+		if err := reporter.ReportNow(ctx); err != nil {
+			logger.Printf("startup report failed: %v", err)
+		} else {
+			ob.Flush(ctx) // send the report (and any failure events) now
+		}
 		if err := reporter.Schedule(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Printf("report scheduler stopped: %v", err)
 		}
 	}()
-
-	// Matrix transport (WP-12). Delivery is fail-closed: Send validates lazily
-	// and refuses to send while the transport is not compatible, so a Matrix
-	// validation failure blocks sending only — monitoring and persistence
-	// continue (spec §5) and startup is never delayed by Matrix. Validate once
-	// asynchronously purely for an early journal signal; it is not a startup
-	// prerequisite.
-	transport, err := matrixtransport.New(matrixtransport.Config{RoomID: cfg.Agent.RoomID, Logger: logger})
-	if err != nil {
-		return fmt.Errorf("failed to create matrix transport: %w", err)
-	}
-	go func() {
-		vctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		defer cancel()
-		compat, verr := transport.Validate(vctx)
-		switch {
-		case verr != nil:
-			logger.Printf("matrix validation failed (delivery blocked, monitoring continues)")
-		case !compat.Compatible:
-			logger.Printf("matrix transport not compatible (delivery blocked, monitoring continues): %s", compat.Reason)
-		default:
-			logger.Printf("matrix transport validated (version %s)", transport.GetVersion())
-		}
-	}()
-
-	// Outbox delivery loop (WP-12): ordered durable retries while pending.
-	ob := outbox.New(store, transport, storage.RealClock{}, logger, outbox.Config{})
-	if err := ob.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start outbox delivery: %w", err)
-	}
-	defer ob.Stop()
 
 	fmt.Printf("vshm running for host %s\n", cfg.Agent.HostName)
 	return sched.Run(ctx)

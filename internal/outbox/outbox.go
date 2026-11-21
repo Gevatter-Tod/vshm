@@ -66,6 +66,7 @@ type Manager struct {
 	clock     model.Clock
 	logger    *logging.Logger
 	mu        sync.Mutex
+	batchMu   sync.Mutex // serializes batches so Flush never overlaps the loop
 	running   bool
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
@@ -117,9 +118,13 @@ func (m *Manager) Stop() {
 	m.wg.Wait()
 }
 
-// runLoop is the main delivery loop.
+// runLoop is the main delivery loop. It processes one batch immediately at
+// start (events left pending before a restart are retried promptly) and then
+// on every delivery interval.
 func (m *Manager) runLoop(ctx context.Context) {
 	defer m.wg.Done()
+
+	m.flush(ctx)
 
 	ticker := m.clock.NewTimer(m.config.DeliveryInterval)
 	defer ticker.Stop()
@@ -133,11 +138,24 @@ func (m *Manager) runLoop(ctx context.Context) {
 			m.logger.Printf("outbox: delivery loop stopped")
 			return
 		case <-ticker.C():
-			if err := m.processBatch(ctx); err != nil {
-				m.logger.Printf("outbox: process batch error: %v", err)
-			}
+			m.flush(ctx)
 			ticker.Reset(m.config.DeliveryInterval)
 		}
+	}
+}
+
+// Flush processes one batch of pending events immediately, outside the
+// regular delivery interval (e.g. right after a failure was recorded or the
+// startup report was enqueued). It is safe to call concurrently with the
+// delivery loop; concurrent calls coalesce into one batch.
+func (m *Manager) Flush(ctx context.Context) { m.flush(ctx) }
+
+// flush runs one batch under batchMu.
+func (m *Manager) flush(ctx context.Context) {
+	m.batchMu.Lock()
+	defer m.batchMu.Unlock()
+	if err := m.processBatch(ctx); err != nil {
+		m.logger.Printf("outbox: process batch error: %v", err)
 	}
 }
 

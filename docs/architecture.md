@@ -11,7 +11,13 @@ vshm is a single-binary host monitoring agent that runs under systemd. It consis
   `test-matrix` (the only sending command: explicit encrypted test), `run` (foreground agent).
   `run` wires the scheduler (WP-03), the daily report scheduler (WP-11) and the outbox delivery loop
   (WP-12) on the fail-closed Matrix transport: Matrix validation is never a startup prerequisite —
-  delivery fails closed while monitoring and persistence continue. Errors exit nonzero, sanitized.
+  delivery fails closed while monitoring and persistence continue. Startup behavior: every check
+  runs promptly; each recorded observation triggers an immediate outbox flush (failure/recovery
+  messages go out as soon as they are recorded, not at the next 30 s tick); once the startup pass
+  completes, the current-date report is enqueued and sent immediately (the per-date dedupe key
+  prevents duplicates), then reports follow the configured schedule. The outbox loop also processes
+  one batch immediately at start, so events left pending before a restart are retried promptly.
+  Errors exit nonzero, sanitized.
   See `docs/operations.md` and `docs/wp13-completion.md`.
 - **Config** (`internal/config`): TOML configuration with validation and secrets handling.
 - **Storage** (`internal/storage`): SQLite-backed persistence with process locking, schema management, and time-based pruning.

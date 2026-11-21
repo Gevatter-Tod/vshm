@@ -65,8 +65,12 @@ Target installation must be inspected and evidence recorded in
 WP‑13 (CLI/deployment) is complete: `cmd/vshm` + `internal/cli` expose exactly
 `validate-config`, `validate-matrix`, `check [ID]`, `once`, `status`,
 `test-matrix`, `run` (all errors nonzero and sanitized; `check` never mutates
-incident state or sends; `once` is one full persisted monitoring pass;
-`run` wires scheduler + daily reports + fail‑closed outbox/Matrix delivery).
+incident state or sends; `once` is one full persisted monitoring pass that
+delivers pending events when done; `run` wires scheduler + daily reports +
+fail‑closed outbox/Matrix delivery — checks run promptly at startup, failure
+messages are flushed as soon as they are recorded, and the current‑date report
+is sent via Matrix right after the startup pass, then the configured schedule
+applies).
 `packaging/vshm.service` is the hardened non‑root unit
 (`/usr/lib/systemd/system/vshm.service`, `ExecStart=/usr/bin/vshm run`, full
 sandbox set, journal‑only logging). `Makefile` provides `build`/`test`/`lint`/
