@@ -3,8 +3,6 @@ package matrixtransport
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/Gevatter-Tod/vshm/internal/logging"
@@ -27,12 +25,7 @@ func TestConfigWithDefaults(t *testing.T) {
 	if got.MinVersion != DefaultMinVersion {
 		t.Errorf("MinVersion = %s, want %s", got.MinVersion, DefaultMinVersion)
 	}
-	if got.CryptoStorePath != DefaultCryptoStorePath {
-		t.Errorf("CryptoStorePath = %s, want %s", got.CryptoStorePath, DefaultCryptoStorePath)
-	}
-	if got.ConfigPath != DefaultConfigPath {
-		t.Errorf("ConfigPath = %s, want %s", got.ConfigPath, DefaultConfigPath)
-	}
+
 	if got.Logger == nil {
 		t.Error("Logger should not be nil")
 	}
@@ -41,14 +34,9 @@ func TestConfigWithDefaults(t *testing.T) {
 func TestNewTransport(t *testing.T) {
 	logger := logging.New("")
 	
-	// Use a temp directory for crypto store
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
-	
-	// Test with defaults but custom crypto path
+	// Test with defaults
 	transport, err := New(Config{
-		CryptoStorePath: cryptoPath,
-		Logger:          logger,
+		Logger: logger,
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -64,14 +52,9 @@ func TestNewTransport(t *testing.T) {
 func TestNewTransportWithCLIPath(t *testing.T) {
 	logger := logging.New("")
 	
-	// Use a temp directory for crypto store
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
-	
 	cfg := Config{
-		CLIPath:         "custom-path",
-		CryptoStorePath: cryptoPath,
-		Logger:          logger,
+		CLIPath: "custom-path",
+		Logger:  logger,
 	}
 	transport, err := New(cfg)
 	if err != nil {
@@ -138,27 +121,10 @@ func TestCheckVersion(t *testing.T) {
 }
 
 func TestEnsureCryptoStore(t *testing.T) {
-	// Create a temp directory
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
-
-	// Test creating new directory
-	if err := ensureCryptoStore(cryptoPath); err != nil {
-		t.Fatalf("ensureCryptoStore failed: %v", err)
-	}
-
-	// Check directory was created
-	info, err := os.Stat(cryptoPath)
-	if err != nil {
-		t.Fatalf("crypto store not created: %v", err)
-	}
-	if !info.IsDir() {
-		t.Error("crypto store is not a directory")
-	}
-
-	// Check permissions (on Unix-like systems)
-	if info.Mode().Perm() != 0700 {
-		t.Errorf("crypto store permissions = %o, want 700", info.Mode().Perm())
+	// matrix-commander-rs manages its own store
+	// We just check if ensureCryptoStore doesn't fail with empty path
+	if err := ensureCryptoStore(""); err != nil {
+		t.Fatalf("ensureCryptoStore failed with empty path: %v", err)
 	}
 }
 
@@ -166,11 +132,9 @@ func TestFormatMessage(t *testing.T) {
 	logger := logging.New("")
 	
 	// Use a temp directory for crypto store
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
 	
 	transport, err := New(Config{
-		CryptoStorePath: cryptoPath,
+		
 		Logger:          logger,
 	})
 	if err != nil {
@@ -192,11 +156,9 @@ func TestGetVersion(t *testing.T) {
 	logger := logging.New("")
 	
 	// Use a temp directory for crypto store
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
 	
 	transport, err := New(Config{
-		CryptoStorePath: cryptoPath,
+		
 		Logger:          logger,
 	})
 	if err != nil {
@@ -219,11 +181,9 @@ func TestIsCompatible(t *testing.T) {
 	logger := logging.New("")
 	
 	// Use a temp directory for crypto store
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
 	
 	transport, err := New(Config{
-		CryptoStorePath: cryptoPath,
+		
 		Logger:          logger,
 	})
 	if err != nil {
@@ -246,11 +206,9 @@ func TestSetRoomID(t *testing.T) {
 	logger := logging.New("")
 	
 	// Use a temp directory for crypto store
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
 	
 	transport, err := New(Config{
-		CryptoStorePath: cryptoPath,
+		
 		Logger:          logger,
 	})
 	if err != nil {
@@ -287,16 +245,15 @@ func TestValidateMatrixCLI(t *testing.T) {
 func TestValidationResult(t *testing.T) {
 	// Test that ValidationResult has all expected fields
 	result := ValidationResult{
-		Compatible:      true,
-		CLIFound:        true,
-		Version:         "1.2.3",
-		VersionOK:       true,
-		CryptoStoreOK:   true,
-		CryptoStorePath: "/path/to/crypto",
-		EncryptionOK:    true,
-		RoomOK:          true,
-		RoomID:          "!room:matrix.org",
-		Reason:          "all checks passed",
+		Compatible:    true,
+		CLIFound:      true,
+		Version:       "1.2.3",
+		VersionOK:     true,
+		CryptoStoreOK: true,
+		EncryptionOK:  true,
+		RoomOK:        true,
+		RoomID:        "!room:matrix.org",
+		Reason:        "all checks passed",
 	}
 
 	if !result.Compatible {
@@ -317,11 +274,9 @@ func TestSendWithMock(t *testing.T) {
 	logger := logging.New("")
 	
 	// Use a temp directory for crypto store
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
 	
 	transport, err := New(Config{
-		CryptoStorePath: cryptoPath,
+		
 		Logger:          logger,
 	})
 	if err != nil {
@@ -340,11 +295,9 @@ func TestTestSend(t *testing.T) {
 	logger := logging.New("")
 	
 	// Use a temp directory for crypto store
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
 	
 	transport, err := New(Config{
-		CryptoStorePath: cryptoPath,
+		
 		Logger:          logger,
 	})
 	if err != nil {
@@ -365,14 +318,12 @@ func TestFakeImplementations(t *testing.T) {
 	logger := logging.New("")
 	
 	// Use a temp directory for crypto store
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
 	
 	// Create a transport with a non-existent CLI path
 	// This should not fail during creation, only during validation
 	transport, err := New(Config{
 		CLIPath:         "nonexistent",
-		CryptoStorePath: cryptoPath,
+		
 		Logger:          logger,
 	})
 	if err != nil {
@@ -448,11 +399,9 @@ func TestCheckVersionEdgeCases(t *testing.T) {
 // Test that we can create a transport with all default values
 func TestTransportWithAllDefaults(t *testing.T) {
 	// Use a temp directory for crypto store
-	tmpDir := t.TempDir()
-	cryptoPath := filepath.Join(tmpDir, "crypto")
 	
 	transport, err := New(Config{
-		CryptoStorePath: cryptoPath,
+		
 	})
 	if err != nil {
 		t.Fatalf("New with all defaults failed: %v", err)

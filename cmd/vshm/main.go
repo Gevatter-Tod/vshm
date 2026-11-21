@@ -79,7 +79,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "validate-matrix":
-		cliPath, configPath, cryptoStorePath, roomID := "", "", "", ""
+		cliPath, configPath, roomID := "", "", ""
 		if len(args) >= 2 {
 			cliPath = args[1]
 		}
@@ -87,12 +87,9 @@ func main() {
 			configPath = args[2]
 		}
 		if len(args) >= 4 {
-			cryptoStorePath = args[3]
+			roomID = args[3]
 		}
-		if len(args) >= 5 {
-			roomID = args[4]
-		}
-		if err := cli.ValidateMatrix(ctx, cliPath, configPath, cryptoStorePath, roomID); err != nil {
+		if err := cli.ValidateMatrix(ctx, cliPath, configPath, roomID); err != nil {
 			fmt.Fprintf(os.Stderr, "validate-matrix: %v\n", err)
 			os.Exit(1)
 		}

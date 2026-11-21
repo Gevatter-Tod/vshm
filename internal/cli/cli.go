@@ -304,17 +304,15 @@ func ValidateSecretPermissions(path string) error {
 }
 
 // ValidateMatrix validates the matrix-commander-rs installation and configuration.
-// It checks: CLI binary exists, version meets requirements, crypto store is accessible,
-// E2EE is supported, and account/room are configured.
-func ValidateMatrix(ctx context.Context, cliPath, configPath, cryptoStorePath, roomID string) error {
+// It checks: CLI binary exists, version meets requirements, E2EE is supported,
+// and account/room are configured.
+// Note: matrix-commander-rs manages its own crypto store, so we don't need to validate it.
+func ValidateMatrix(ctx context.Context, cliPath, configPath, roomID string) error {
 	logger := logging.New("vshm: ")
 	
 	// Use config values if not provided
 	if cliPath == "" {
 		cliPath = matrixtransport.DefaultCLIPath
-	}
-	if cryptoStorePath == "" {
-		cryptoStorePath = matrixtransport.DefaultCryptoStorePath
 	}
 	if roomID == "" {
 		// Try to get from config
@@ -330,13 +328,13 @@ func ValidateMatrix(ctx context.Context, cliPath, configPath, cryptoStorePath, r
 	}
 
 	// Validate the matrix CLI
-	result, err := matrixtransport.ValidateMatrixCLI(ctx, cliPath, configPath, cryptoStorePath, roomID, logger)
+	// cryptoStorePath is empty - matrix-commander-rs manages its own store
+	result, err := matrixtransport.ValidateMatrixCLI(ctx, cliPath, configPath, "", roomID, logger)
 	if err != nil {
 		fmt.Printf("Matrix validation FAILED: %v\n", err)
 		fmt.Printf("\nValidation details:\n")
 		fmt.Printf("  CLI found: %v\n", result.CLIFound)
 		fmt.Printf("  Version: %s (OK: %v)\n", result.Version, result.VersionOK)
-		fmt.Printf("  Crypto store: %s (OK: %v)\n", result.CryptoStorePath, result.CryptoStoreOK)
 		fmt.Printf("  Encryption: %v\n", result.EncryptionOK)
 		fmt.Printf("  Room: %s (OK: %v)\n", result.RoomID, result.RoomOK)
 		fmt.Printf("  Reason: %s\n", result.Reason)
@@ -347,8 +345,8 @@ func ValidateMatrix(ctx context.Context, cliPath, configPath, cryptoStorePath, r
 	fmt.Printf("\nValidation details:\n")
 	fmt.Printf("  CLI: %s (found)\n", cliPath)
 	fmt.Printf("  Version: %s\n", result.Version)
-	fmt.Printf("  Crypto store: %s\n", result.CryptoStorePath)
 	fmt.Printf("  Encryption: verified\n")
+	fmt.Printf("  Crypto store: %s\n", result.CryptoStorePath)
 	if roomID != "" {
 		fmt.Printf("  Room: %s\n", roomID)
 	}
@@ -365,6 +363,18 @@ func TestMatrix(ctx context.Context, cliPath, roomID, message string) error {
 	// Use default CLI path if not provided
 	if cliPath == "" {
 		cliPath = matrixtransport.DefaultCLIPath
+	}
+	
+	// Fall back to the configured room if no room ID was given on the command
+	// line (same behavior as ValidateMatrix).
+	if roomID == "" {
+		cfg, err := config.Load(config.GetConfigPath())
+		if err == nil {
+			roomID = cfg.Agent.RoomID
+		}
+	}
+	if roomID == "" {
+		return fmt.Errorf("room_id is required: pass it as an argument or set agent.room_id in %s", config.GetConfigPath())
 	}
 	
 	// Create transport

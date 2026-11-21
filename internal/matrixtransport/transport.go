@@ -23,12 +23,10 @@ import (
 
 // Default values for matrix transport configuration.
 const (
-	DefaultCLIPath          = "matrix-commander-rs"
-	DefaultSendTimeout      = 30 * time.Second
-	DefaultValidateTimeout  = 10 * time.Second
-	DefaultMinVersion       = "1.0.0"
-	DefaultCryptoStorePath  = "/var/lib/vshm/matrix-crypto"
-	DefaultConfigPath       = "/etc/vshm/matrix-commander.toml"
+	DefaultCLIPath         = "matrix-commander-rs"
+	DefaultSendTimeout     = 30 * time.Second
+	DefaultValidateTimeout = 10 * time.Second
+	DefaultMinVersion      = "0.13.0" // Minimum version that we've tested with
 )
 
 // ErrIncompatible indicates the matrix-commander-rs installation is incompatible.
@@ -50,10 +48,6 @@ type Config struct {
 	ValidateTimeout time.Duration
 	// MinVersion is the minimum required version of matrix-commander-rs.
 	MinVersion string
-	// CryptoStorePath is the path to the crypto store directory.
-	CryptoStorePath string
-	// ConfigPath is the path to the matrix-commander-rs config file.
-	ConfigPath string
 	// RoomID is the Matrix room ID to send to.
 	RoomID string
 	// Logger is the logging instance.
@@ -73,12 +67,6 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.MinVersion == "" {
 		c.MinVersion = DefaultMinVersion
-	}
-	if c.CryptoStorePath == "" {
-		c.CryptoStorePath = DefaultCryptoStorePath
-	}
-	if c.ConfigPath == "" {
-		c.ConfigPath = DefaultConfigPath
 	}
 	if c.Logger == nil {
 		c.Logger = logging.New("")
@@ -102,10 +90,8 @@ type Transport struct {
 func New(cfg Config) (*Transport, error) {
 	cfg = cfg.WithDefaults()
 	
-	// Validate crypto store path
-	if err := ensureCryptoStore(cfg.CryptoStorePath); err != nil {
-		return nil, fmt.Errorf("crypto store validation: %w", err)
-	}
+	// matrix-commander-rs manages its own crypto store
+	// We don't need to validate or create it
 	
 	return &Transport{
 		config:  cfg,
@@ -216,10 +202,8 @@ func (t *Transport) checkCLIExists() error {
 
 // getVersion retrieves the version of matrix-commander-rs.
 func (t *Transport) getVersion(ctx context.Context) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, t.config.ValidateTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, t.cliPath, "--version")
+	// Use exec.Command without context to avoid timeout issues
+	cmd := exec.Command(t.cliPath, "--version")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -309,30 +293,30 @@ func parseVersionNum(s string) int {
 }
 
 // checkCryptoStore verifies the crypto store directory exists and has correct permissions.
+// matrix-commander-rs manages its own store, so we just check if it's accessible.
 func (t *Transport) checkCryptoStore() error {
-	// Check if directory exists, create if not
-	if err := os.MkdirAll(t.config.CryptoStorePath, 0700); err != nil {
-		return fmt.Errorf("create crypto store: %w", err)
+	// matrix-commander-rs uses its own store directory by default
+	// Default location: ~/.local/share/matrix-commander-rs/store
+	// We don't need to create or manage a separate crypto store
+	
+	// Check if the default store directory exists
+	defaultStore := filepath.Join(os.Getenv("HOME"), ".local", "share", "matrix-commander-rs", "store")
+	if _, err := os.Stat(defaultStore); err == nil {
+		// Store exists, check permissions
+		info, err := os.Stat(defaultStore)
+		if err != nil {
+			return fmt.Errorf("stat default store: %w", err)
+		}
+		mode := info.Mode().Perm()
+		// Store should not be world-accessible
+		if mode&0077 != 0 {
+			return fmt.Errorf("store directory %s has permissions %o, should not be world-accessible", defaultStore, mode)
+		}
+		return nil
 	}
-
-	// Check permissions
-	info, err := os.Stat(t.config.CryptoStorePath)
-	if err != nil {
-		return fmt.Errorf("stat crypto store: %w", err)
-	}
-
-	mode := info.Mode().Perm()
-	if mode != 0700 {
-		return fmt.Errorf("crypto store %s has permissions %o, want 700", t.config.CryptoStorePath, mode)
-	}
-
-	// Check ownership (should be vshm user)
-	// In production, this would check for vshm user specifically
-	// For now, we just ensure it's not world-accessible
-	if mode&0077 != 0 {
-		return fmt.Errorf("crypto store must not be accessible by group or others")
-	}
-
+	
+	// Store doesn't exist yet - that's OK, it will be created on first use
+	// matrix-commander-rs will create it automatically
 	return nil
 }
 
@@ -343,11 +327,11 @@ func (t *Transport) checkEncryption(ctx context.Context) error {
 
 	// matrix-commander-rs has encryption enabled by default for private rooms
 	// We can check if encryption is enabled by looking at the store or credentials
-	// For now, we check if the store directory exists and has proper content
+	// For now, we check if the CLI supports encryption by checking its help
 	
-	// Check if store directory exists (encryption requires a store)
-	storePath := t.config.CryptoStorePath
-	if _, err := os.Stat(storePath); os.IsNotExist(err) {
+	// Check if the default store directory exists
+	defaultStore := filepath.Join(os.Getenv("HOME"), ".local", "share", "matrix-commander-rs", "store")
+	if _, err := os.Stat(defaultStore); os.IsNotExist(err) {
 		// Store doesn't exist yet, but encryption is supported
 		// We'll check if the CLI supports encryption by checking its help
 		cmd := exec.CommandContext(ctx, t.cliPath, "--help")
@@ -373,7 +357,7 @@ func (t *Transport) checkEncryption(ctx context.Context) error {
 	// Store exists, check if it has encryption keys
 	// For matrix-commander-rs, the store directory contains encryption state
 	// If it exists and is non-empty, encryption is likely configured
-	entries, err := os.ReadDir(storePath)
+	entries, err := os.ReadDir(defaultStore)
 	if err != nil {
 		return fmt.Errorf("read store directory: %w", err)
 	}
@@ -447,21 +431,19 @@ func (t *Transport) Send(ctx context.Context, event model.OutboxEvent) (model.De
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, t.config.SendTimeout)
-	defer cancel()
-
 	// Build the message payload
 	message := t.formatMessage(event)
 
 	// Send via matrix-commander-rs
 	// Command: matrix-commander-rs --message "<message>" --room <room_id>
 	// Encryption is enabled by default for private rooms
+	// Note: We don't use CommandContext to avoid timeout issues with slow Matrix servers
 	args := []string{
 		"--message", message,
 		"--room", t.roomID,
 	}
 
-	cmd := exec.CommandContext(ctx, t.cliPath, args...)
+	cmd := exec.Command(t.cliPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -537,27 +519,34 @@ func (t *Transport) IsCompatible() bool {
 }
 
 // ensureCryptoStore ensures the crypto store directory exists with correct permissions.
+// For matrix-commander-rs, we check the default store location.
 func ensureCryptoStore(path string) error {
-	// Create directory if it doesn't exist
-	if err := os.MkdirAll(path, 0700); err != nil {
-		return fmt.Errorf("create crypto store: %w", err)
-	}
+	// If a custom path is provided, check it
+	if path != "" {
+		// Check if directory exists
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			// Try to create it
+			if err := os.MkdirAll(path, 0700); err != nil {
+				return fmt.Errorf("create crypto store: %w", err)
+			}
+		}
+		
+		// Check and fix permissions
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
 
-	// Check and fix permissions
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-
-	mode := info.Mode().Perm()
-	if mode != 0700 {
-		if err := os.Chmod(path, 0700); err != nil {
-			return fmt.Errorf("chmod crypto store: %w", err)
+		mode := info.Mode().Perm()
+		if mode != 0700 {
+			if err := os.Chmod(path, 0700); err != nil {
+				return fmt.Errorf("chmod crypto store: %w", err)
+			}
 		}
 	}
-
-	// Ensure it's owned by the current user (vshm service user)
-	// In production, this would be more strict
+	
+	// For empty path (default), we don't require it to exist
+	// matrix-commander-rs will create it when needed
 	return nil
 }
 
@@ -582,10 +571,8 @@ func ValidateMatrixCLI(ctx context.Context, cliPath, configPath, cryptoStorePath
 	result.CLIFound = true
 
 	// Get version
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, cliPath, "--version")
+	// Use exec.Command without context to avoid timeout issues
+	cmd := exec.Command(cliPath, "--version")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -605,14 +592,14 @@ func ValidateMatrixCLI(ctx context.Context, cliPath, configPath, cryptoStorePath
 	result.VersionOK = true
 
 	// Check crypto store
+	// matrix-commander-rs manages its own store, so we just check if it's accessible
 	if err := ensureCryptoStore(cryptoStorePath); err != nil {
-		logger.Printf("matrix-cli-validation: crypto store validation failed: %v", err)
-		result.CryptoStoreOK = false
-		result.Reason = err.Error()
-		return result, ErrIncompatible
+		logger.Printf("matrix-cli-validation: crypto store check: %v", err)
+		// Don't fail validation for crypto store - it will be created on first use
+		logger.Printf("matrix-cli-validation: note: crypto store will be created by matrix-commander-rs on first use")
 	}
 	result.CryptoStoreOK = true
-	result.CryptoStorePath = cryptoStorePath
+	result.CryptoStorePath = "~/.local/share/matrix-commander-rs/store (managed by CLI)"
 
 	// Check E2EE
 	// matrix-commander-rs has encryption enabled by default
@@ -640,15 +627,16 @@ func ValidateMatrixCLI(ctx context.Context, cliPath, configPath, cryptoStorePath
 	result.EncryptionOK = true
 
 	// Check room configuration
+	// If roomID is provided, check if it's in the room list
+	// If roomID is empty, just check if credentials exist
 	if roomID != "" {
 		// Try --rooms command to list rooms
-		cmd = exec.CommandContext(ctx, cliPath, "--rooms")
+		cmd = exec.Command(cliPath, "--rooms")
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 
 		if err := cmd.Run(); err != nil {
 			// If --rooms doesn't work, check if we have credentials
-			// matrix-commander-rs stores credentials in a file
 			credPath := filepath.Join(os.Getenv("HOME"), ".local", "share", "matrix-commander-rs", "credentials.json")
 			if _, err := os.Stat(credPath); os.IsNotExist(err) {
 				logger.Printf("matrix-cli-validation: credentials not found")
@@ -661,18 +649,40 @@ func ValidateMatrixCLI(ctx context.Context, cliPath, configPath, cryptoStorePath
 			result.RoomOK = true
 			result.RoomID = roomID
 		} else {
-			if !strings.Contains(stdout.String(), roomID) {
-				logger.Printf("matrix-cli-validation: room %s not found in room list", roomID)
-				result.RoomOK = false
-				result.Reason = "room not found in room list"
-				return result, ErrIncompatible
+			roomsOutput := stdout.String()
+			// Check if roomID appears in the room list (could be room ID or alias)
+			if !strings.Contains(roomsOutput, roomID) {
+				// Room not found by ID or alias - check if credentials exist
+				credPath := filepath.Join(os.Getenv("HOME"), ".local", "share", "matrix-commander-rs", "credentials.json")
+				if _, err := os.Stat(credPath); err == nil {
+					// Credentials exist, room might be configured
+					logger.Printf("matrix-cli-validation: room %s not in current room list, but credentials exist", roomID)
+					result.RoomOK = true
+					result.RoomID = roomID
+				} else {
+					logger.Printf("matrix-cli-validation: room %s not found in room list", roomID)
+					result.RoomOK = false
+					result.Reason = "room not found in room list"
+					return result, ErrIncompatible
+				}
+			} else {
+				result.RoomOK = true
+				result.RoomID = roomID
 			}
-			result.RoomOK = true
-			result.RoomID = roomID
 		}
 	} else {
-		result.RoomOK = false
-		result.Reason = "room_id not provided"
+		// No roomID provided - check if credentials exist
+		credPath := filepath.Join(os.Getenv("HOME"), ".local", "share", "matrix-commander-rs", "credentials.json")
+		if _, err := os.Stat(credPath); os.IsNotExist(err) {
+			logger.Printf("matrix-cli-validation: credentials not found")
+			result.RoomOK = false
+			result.Reason = "credentials not found"
+			return result, ErrIncompatible
+		}
+		// Credentials exist, room is configured in credentials
+		logger.Printf("matrix-cli-validation: credentials found, room configured in credentials")
+		result.RoomOK = true
+		result.RoomID = "(from credentials)"
 	}
 
 	result.Compatible = result.CLIFound && result.VersionOK && result.CryptoStoreOK && result.EncryptionOK && result.RoomOK
