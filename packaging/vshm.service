@@ -1,20 +1,40 @@
 [Unit]
-Description=Very Simple Host Monitor
+Description=Very Simple Host Monitor (vshm)
 After=network.target
 
 [Service]
 Type=simple
+# Dedicated non-root account, no capabilities; vshm never runs as root.
 User=vshm
 Group=vshm
-ExecStart=/usr/bin/vshm
+ExecStart=/usr/bin/vshm run
 Restart=on-failure
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
+RestartSec=5s
+UMask=0077
+StateDirectory=vshm
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/vshm
+
+# Hardening. All directives below require systemd >= 247; on older systemd the
+# unit must fail to load rather than silently drop protections.
 NoNewPrivileges=true
+PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/vshm
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+# AF_UNIX keeps the read-only systemd system-bus socket reachable (the
+# filesystem stays read-only under ProtectSystem=strict, so bus access cannot
+# modify anything); AF_INET/AF_INET6 permit the outbound Matrix delivery.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Journal is the sole logging destination; logs are bounded/sanitized and rely
+# on host journald rotation.
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

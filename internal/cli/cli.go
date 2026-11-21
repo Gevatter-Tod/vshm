@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/Gevatter-Tod/vshm/internal/logging"
 	"github.com/Gevatter-Tod/vshm/internal/matrixtransport"
 	"github.com/Gevatter-Tod/vshm/internal/model"
+	"github.com/Gevatter-Tod/vshm/internal/outbox"
 	"github.com/Gevatter-Tod/vshm/internal/reports"
 	"github.com/Gevatter-Tod/vshm/internal/scheduler"
 	"github.com/Gevatter-Tod/vshm/internal/storage"
@@ -71,8 +73,9 @@ func newObserver(hostName string, store model.Store, logger *logging.Logger) (sc
 	return incidents.New(hostName, store, storage.RealClock{}, logger)
 }
 
-// newScheduler resolves the configured checks into a scheduler.
-func newScheduler(cfg *config.Config, observer scheduler.Observer, pruner scheduler.Pruner, logger *logging.Logger) (*scheduler.Scheduler, error) {
+// buildEntries registers all check adapters and resolves the configured
+// checks into scheduler entries (effective interval/timeout applied).
+func buildEntries(cfg *config.Config, logger *logging.Logger) ([]scheduler.Entry, error) {
 	reg := scheduler.NewRegistry()
 	for _, c := range []model.Check{
 		systemd.New(logger), http.New(logger), ping.New(logger), mysql.New(logger), webdav.New(logger),
@@ -85,6 +88,20 @@ func newScheduler(cfg *config.Config, observer scheduler.Observer, pruner schedu
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve checks: %w", err)
 	}
+	return entries, nil
+}
+
+// newScheduler resolves the configured checks into a scheduler.
+func newScheduler(cfg *config.Config, observer scheduler.Observer, pruner scheduler.Pruner, logger *logging.Logger) (*scheduler.Scheduler, error) {
+	entries, err := buildEntries(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	return newSchedulerFromEntries(entries, observer, pruner, logger)
+}
+
+// newSchedulerFromEntries builds a scheduler from pre-resolved entries.
+func newSchedulerFromEntries(entries []scheduler.Entry, observer scheduler.Observer, pruner scheduler.Pruner, logger *logging.Logger) (*scheduler.Scheduler, error) {
 	return scheduler.New(scheduler.Options{
 		Clock:    storage.RealClock{},
 		Observer: observer,
@@ -161,6 +178,65 @@ func (p *printingObserver) Observe(ctx context.Context, r model.CheckResult) err
 	// emoticon, age, reason_code, optional sanitized reason; no duration field.
 	fmt.Println(reports.FormatCheckLine(r.CheckID, r.CheckType, r.Success, false, time.Since(r.CompletedAt), r.ReasonCode, r.Reason))
 	return p.inner.Observe(ctx, r)
+}
+
+// RunCheck runs the named check, or every configured check when checkID is
+// empty, exactly once with the check's effective timeout as the single
+// absolute deadline. It never opens the store: no incident state is changed
+// and nothing is sent. One sanitized result line is printed per check plus a
+// summary; a nonzero error is returned when any check failed or the ID is
+// unknown.
+func RunCheck(ctx context.Context, checkID, configPath string) error {
+	if configPath == "" {
+		configPath = config.GetConfigPath()
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if err := config.Validate(cfg); err != nil {
+		return fmt.Errorf("failed to validate config: %w", err)
+	}
+
+	logger := logging.New("vshm: ")
+	entries, err := buildEntries(cfg, logger)
+	if err != nil {
+		return err
+	}
+
+	selected := entries
+	if checkID != "" {
+		selected = nil
+		for _, e := range entries {
+			if e.Config.CheckID() == checkID {
+				selected = []scheduler.Entry{e}
+				break
+			}
+		}
+		if selected == nil {
+			ids := make([]string, 0, len(entries))
+			for _, e := range entries {
+				ids = append(ids, e.Config.CheckID())
+			}
+			return fmt.Errorf("unknown check ID %q (configured: %s)", checkID, strings.Join(ids, ", "))
+		}
+	}
+
+	failed := 0
+	for _, e := range selected {
+		cctx, cancel := context.WithTimeout(ctx, e.Timeout)
+		res := e.Check.Run(cctx, e.Config)
+		cancel()
+		fmt.Println(reports.FormatCheckLine(res.CheckID, res.CheckType, res.Success, false, time.Since(res.CompletedAt), res.ReasonCode, res.Reason))
+		if !res.Success {
+			failed++
+		}
+	}
+	fmt.Printf("check: %d run, %d failed\n", len(selected), failed)
+	if failed > 0 {
+		return fmt.Errorf("%d of %d check(s) failed", failed, len(selected))
+	}
+	return nil
 }
 
 // DBFileName is the SQLite database file name inside the state directory.
@@ -245,8 +321,12 @@ func Status(ctx context.Context, stateDir string) error {
 }
 
 // RunAgent validates the configuration, takes the state-directory lock and runs
-// until ctx is cancelled. A cleanup failure in the scheduler is returned as an
-// error so the process exits nonzero and systemd restarts it.
+// the full agent until ctx is cancelled: the check scheduler (WP-03), the daily
+// report scheduler (WP-11) and the outbox delivery loop (WP-12) on the Matrix
+// transport. A Matrix compatibility failure blocks sending only — the
+// transport fails closed and monitoring/persistence continue. A cleanup
+// failure in the scheduler is returned as an error so the process exits
+// nonzero and systemd restarts it.
 func RunAgent(ctx context.Context, configPath, stateDir string) error {
 	if configPath == "" {
 		configPath = config.GetConfigPath()
@@ -257,6 +337,11 @@ func RunAgent(ctx context.Context, configPath, stateDir string) error {
 	}
 	if err := config.Validate(cfg); err != nil {
 		return fmt.Errorf("failed to validate config: %w", err)
+	}
+	// config.Validate applies defaults on a copy; normalize here for the
+	// report service, which needs an explicit HH:MM.
+	if cfg.Agent.ReportTime == "" {
+		cfg.Agent.ReportTime = "09:00"
 	}
 
 	store, err := openStore(ctx, stateDir)
@@ -270,10 +355,66 @@ func RunAgent(ctx context.Context, configPath, stateDir string) error {
 	if err != nil {
 		return err
 	}
-	sched, err := newScheduler(cfg, observer, store, logger)
+	entries, err := buildEntries(cfg, logger)
 	if err != nil {
 		return err
 	}
+	sched, err := newSchedulerFromEntries(entries, observer, store, logger)
+	if err != nil {
+		return err
+	}
+
+	// Daily report scheduler (WP-11): next-future-only, DST-aware, no catch-up.
+	limits := make([]reports.CheckLimit, 0, len(entries))
+	for _, e := range entries {
+		limits = append(limits, reports.CheckLimit{
+			CheckID:   e.Config.CheckID(),
+			CheckType: e.Config.CheckType(),
+			Interval:  e.Interval,
+			Timeout:   e.Timeout,
+		})
+	}
+	reporter, err := reports.New(cfg.Agent.HostName, store, storage.RealClock{}, cfg.Agent.ReportTime, cfg.Metrics.Mounts, limits, nil, logger)
+	if err != nil {
+		return fmt.Errorf("failed to create report service: %w", err)
+	}
+	go func() {
+		if err := reporter.Schedule(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Printf("report scheduler stopped: %v", err)
+		}
+	}()
+
+	// Matrix transport (WP-12). Delivery is fail-closed: Send validates lazily
+	// and refuses to send while the transport is not compatible, so a Matrix
+	// validation failure blocks sending only — monitoring and persistence
+	// continue (spec §5) and startup is never delayed by Matrix. Validate once
+	// asynchronously purely for an early journal signal; it is not a startup
+	// prerequisite.
+	transport, err := matrixtransport.New(matrixtransport.Config{RoomID: cfg.Agent.RoomID, Logger: logger})
+	if err != nil {
+		return fmt.Errorf("failed to create matrix transport: %w", err)
+	}
+	go func() {
+		vctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		compat, verr := transport.Validate(vctx)
+		switch {
+		case verr != nil:
+			logger.Printf("matrix validation failed (delivery blocked, monitoring continues)")
+		case !compat.Compatible:
+			logger.Printf("matrix transport not compatible (delivery blocked, monitoring continues): %s", compat.Reason)
+		default:
+			logger.Printf("matrix transport validated (version %s)", transport.GetVersion())
+		}
+	}()
+
+	// Outbox delivery loop (WP-12): ordered durable retries while pending.
+	ob := outbox.New(store, transport, storage.RealClock{}, logger, outbox.Config{})
+	if err := ob.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start outbox delivery: %w", err)
+	}
+	defer ob.Stop()
+
 	fmt.Printf("vshm running for host %s\n", cfg.Agent.HostName)
 	return sched.Run(ctx)
 }

@@ -1,70 +1,101 @@
 # Operations Guide
 
+v1 scope: Linux amd64 with systemd only. The agent is a single C-free binary at
+`/usr/bin/vshm`, supervised by the packaged unit
+`/usr/lib/systemd/system/vshm.service`, running as the dedicated non-root
+`vshm:vshm` account (no capabilities; ping works unprivileged — no `CAP_NET_RAW`).
+
+## Commands
+
+| Command | Effect | Exit |
+|---|---|---|
+| `vshm validate-config [config]` | schema/values/duplicate-ID/range/path/secret-permission validation; no network, no send | 0 ok / 1 invalid |
+| `vshm validate-matrix [cli] [config] [room]` | non-sending Matrix compatibility check | 0 compatible / 1 blocked |
+| `vshm check [ID] [config]` | run the named check, or all checks when ID is omitted, once with the configured timeout; **no incident state change, no send**, nothing persisted | 0 all passed / 1 any failed or unknown ID |
+| `vshm once [config] [stateDir]` | single full monitoring pass: every check exactly once on the worker pool, observations recorded through the incident/outbox pipeline (persisted), one sanitized line per check plus a summary | 0 run / 1 infrastructure error |
+| `vshm status [stateDir]` | last observations/ages, incidents, pending/delivery/discard counts and reasons, storage fault, DB health | 0 / 1 |
+| `vshm test-matrix [cli] [room] [message]` | the **only** command that sends — an explicit encrypted test message | 0 sent / 1 failed |
+| `vshm run [config] [stateDir]` | the agent in foreground: scheduler + daily reports + outbox delivery; what systemd runs | 0 on clean shutdown / nonzero on error or cleanup failure |
+
+Errors are nonzero and sanitized (no secrets, SQL text, or row values in output).
+Default paths: config `/etc/vshm/vshm.toml`, state `/var/lib/vshm`.
+
 ## Installation
 
-### Systemd Service
-
 ```bash
-sudo cp packaging/vshm.service /etc/systemd/system/
+# 1. Service account and protected paths
+sudo useradd -r -s /usr/sbin/nologin vshm
+sudo install -d -o root -g vshm -m 0750 /etc/vshm/secrets
+sudo install -o root -g vshm -m 0640 /etc/vshm/vshm.toml.example /etc/vshm/vshm.toml
+# secret files: /etc/vshm/secrets/*.ini, root:vshm 0640, never group/other-writable
+
+# 2. Release binary + unit (or: make install DESTDIR=/)
+sudo install -m 0755 dist/vshm-linux-amd64 /usr/bin/vshm
+sudo install -m 0644 packaging/vshm.service /usr/lib/systemd/system/vshm.service
+
+# 3. Validate before starting; then enable/start
+sudo /usr/bin/vshm validate-config
+sudo /usr/bin/vshm validate-matrix     # failure blocks SENDING only, not monitoring
 sudo systemctl daemon-reload
 sudo systemctl enable --now vshm
+sudo systemctl status vshm
+sudo /usr/bin/vshm status
 ```
 
-### Manual Installation
-
-```bash
-sudo cp vshm /usr/bin/
-sudo chown root:vshm /usr/bin/vshm
-sudo chmod 755 /usr/bin/vshm
-```
+No language runtime or package installation is needed on the target. The unit
+uses `User=vshm`, `Group=vshm`, `ExecStart=/usr/bin/vshm run`,
+`Restart=on-failure`, `RestartSec=5s`, `UMask=0077`, `StateDirectory=vshm`
+(0700), `ReadWritePaths=/var/lib/vshm` plus the full sandbox set
+(`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+kernel/CG protections, `LockPersonality`, `RestrictSUIDSGID`,
+`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` — AF_UNIX keeps the
+read-only system bus reachable, AF_INET/AF_INET6 permit Matrix delivery).
+Journal is the sole logging destination. Only systemd supervision restarts
+vshm; it never remediates monitored targets. Verify a packaged unit with
+`systemd-analyze verify` (all directives require systemd ≥ 247; on older
+systemd the unit fails to load rather than silently dropping protections).
 
 ## Configuration
 
-### Example Configuration
+- **Path**: `/etc/vshm/vshm.toml`, `root:vshm` `0640` (see `config/example.toml`).
+- Unknown keys, duplicate check IDs, malformed values, invalid ranges, missing
+  files and insecure secret permissions are hard errors (`vshm validate-config`).
+- **Config changes require a restart** (`sudo systemctl restart vshm`);
+  a restart preserves incident state, report date keys and the outbox —
+  nothing is reset or caught up.
+- Invalid config makes the new process fail clearly without altering persisted
+  monitoring state.
+
+### Example
 
 ```toml
-[[checks]]
-  check_id = "systemd-check"
-  type = "systemd"
-  target = "multi-user.target"
-  interval = "5m"
-  timeout = "30s"
+[agent]
+host_name = "my-server"
+interval = "30m"      # default 30m, range 1m-7d
+timeout = "10s"       # default 10s, range 1-300s, must be < interval
+report_time = "09:00" # daily report, server-local HH:MM
+room_id = "!roomid:matrix.org"
 
 [[checks]]
-  check_id = "http-check"
-  type = "http"
-  url = "https://example.com/health"
-  interval = "1m"
-  timeout = "10s"
-
-[[checks]]
-  check_id = "ping-check"
-  type = "ping"
-  host = "192.168.1.1"
-  interval = "5m"
-  timeout = "10s"
+check_id = "http-check"
+type = "http"
+url = "https://example.com/health"
+expected_status = 200
+interval = "1m"
+timeout = "10s"
 ```
 
-### Configuration Location
-
-- **Path**: `/etc/vshm/vshm.toml`
-- **Owner**: root
-- **Group**: vshm
-- **Permissions**: 0640
+Check types: `systemd` (`target`), `http` (`url`, `expected_status`, `contains`,
+`credential_file`), `ping` (`host`), `mysql` (`host`/`port`/`tls_ca` or
+`socket`, `database`, `credential_file`, single read-only `query`),
+`webdav` (`url` https, `depth` 0|1, `credential_file`).
 
 ## Secrets
 
-### Secret Files
-
 ```bash
-sudo mkdir -p /etc/vshm/secrets
-sudo chown root:vshm /etc/vshm/secrets
-sudo chmod 750 /etc/vshm/secrets
+sudo install -d -o root -g vshm -m 0750 /etc/vshm/secrets
+# e.g. /etc/vshm/secrets/mysql.ini — root:vshm 0640
 ```
-
-### MySQL Credentials
-
-Create `/etc/vshm/secrets/mysql.ini`:
 
 ```ini
 [mysql]
@@ -75,100 +106,68 @@ port=3306
 database=monitoring
 ```
 
-## Monitoring
+Secrets never appear in command arguments, logs, reports, source control or
+the sample config.
 
-### Check Status
+## Day-to-day
 
 ```bash
-systemctl status vshm
+systemctl status vshm                 # service state
+journalctl -u vshm -f                 # logs (sole destination, bounded/sanitized)
+/usr/bin/vshm status                  # observations, incidents, outbox counts, storage fault
+/usr/bin/vshm check http-check        # ad-hoc single check, no side effects
+/usr/bin/vshm check                   # all checks, no side effects
+/usr/bin/vshm once                    # one full monitoring pass (records state)
+/usr/bin/vshm validate-config
+/usr/bin/vshm validate-matrix         # non-sending compatibility check
+/usr/bin/vshm test-matrix             # explicit encrypted test send — only after approval
 ```
 
-### View Logs
+### Manual run as a non-service user (non-root)
+
+The deployed agent runs as `vshm:vshm` and uses `/var/lib/vshm` (owned
+`vshm:vshm` 0700). Any other non-root user cannot write there; in that case
+`vshm` falls back to a per-user state dir (`$XDG_STATE_HOME/vshm`, default
+`~/.local/state/vshm`, mode 0700) and prints a notice. You can also choose
+explicitly:
 
 ```bash
-journalctl -u vshm -f
-```
-
-### Database Inspection
-
-```bash
-sqlite3 /var/lib/vshm/vshm.db
-```
-
-## Troubleshooting
-
-### Configuration Errors
-
-```bash
-./vshm validate-config
-```
-
-### Test Single Check
-
-```bash
-./vshm once --check systemd-check
-```
-
-### Manual Run
-
-```bash
-sudo -u vshm /usr/bin/vshm
-```
-
-### Manual Run as a Non-Service User (non-root)
-
-The deployed agent runs as the dedicated non-root `vshm:vshm` account and
-uses `/var/lib/vshm` (created at install time, owned `vshm:vshm` 0700 — see
-`docs/vshm-spec.md` §6). Any other non-root user cannot write there; in that
-case `vshm` automatically falls back to a per-user state dir
-(`$XDG_STATE_HOME/vshm`, default `~/.local/state/vshm`, mode 0700) and prints
-a notice. You can also choose explicitly:
-
-```bash
-./vshm once                          # falls back to ~/.local/state/vshm if needed
+./vshm run /etc/vshm/vshm.toml /tmp/vshm-state   # foreground diagnosis
 ./vshm once /etc/vshm/vshm.toml /tmp/vshm-state
 ./vshm status /tmp/vshm-state
 ```
 
-Note the config file `/etc/vshm/vshm.toml` is `root:vshm` 0640, so a non-root
-user must be in the `vshm` group (or pass a readable copy as the config
-argument). Each state dir has its own SQLite database — don't mix them if you
-need continuous incident history.
+`/etc/vshm/vshm.toml` is `root:vshm` 0640, so a non-root user must be in the
+`vshm` group (or pass a readable copy as the config argument). Each state dir
+has its own SQLite database — don't mix them if you need continuous incident
+history. A second instance on the same state dir is refused (lock file).
 
-## Maintenance
-
-### Update
+## Upgrade
 
 ```bash
+# /var/lib/vshm is sensitive host-specific data (incl. Matrix crypto state):
+# back it up on the same host only — NEVER copy crypto identity to another host.
 sudo systemctl stop vshm
-sudo cp vshm /usr/bin/
+sudo cp -a /var/lib/vshm /var/backups/vshm-$(date +%F)/
+sudo install -m 0755 dist/vshm-linux-amd64 /usr/bin/vshm
+sudo install -m 0644 packaging/vshm.service /usr/lib/systemd/system/vshm.service
+sudo systemctl daemon-reload
+sudo /usr/bin/vshm validate-config      # explicit migrations/validation
+sudo /usr/bin/vshm validate-matrix
 sudo systemctl start vshm
+sudo /usr/bin/vshm status               # verify: incidents/outbox preserved
 ```
 
-### Database Backup
+## Troubleshooting
 
 ```bash
-sudo cp /var/lib/vshm/vshm.db /backup/vshm.db
+/usr/bin/vshm validate-config                    # configuration errors
+/usr/bin/vshm check <id>                         # single check, no side effects
+/usr/bin/vshm status                             # storage fault, pending/delivery/discard counts+reasons
+journalctl -u vshm -n 200                        # sanitized, bounded logs
+sqlite3 /var/lib/vshm/vshm.db "SELECT ..."       # read-only inspection (stop vshm first)
 ```
 
-### Database Pruning
-
-```bash
-sqlite3 /var/lib/vshm/vshm.db "DELETE FROM results_history WHERE completed_at_utc < datetime('now', '-30 days');"
-```
-
-## Security
-
-### User Creation
-
-```bash
-sudo useradd -r -s /bin/false vshm
-```
-
-### File Permissions
-
-```bash
-sudo chown -R root:vshm /etc/vshm
-sudo chown -R vshm:vshm /var/lib/vshm
-sudo chmod 700 /var/lib/vshm
-```
+Pruning (90-day observations, 30-day delivered events, 24h pending expiry,
+oldest-first low-space eviction, WAL checkpoint/recheck) is automatic; see
+`docs/architecture.md`.

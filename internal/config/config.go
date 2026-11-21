@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -91,7 +92,6 @@ type Config struct {
 	Metrics     MetricsConfig   `toml:"metrics"`
 	Storage     StorageConfig   `toml:"storage"`
 	Checks      []CheckConfig   `toml:"checks"`
-	unknownKeys map[string]bool `toml:"-"` // Tracks unknown keys for validation
 }
 
 // Load loads configuration from a file with strict unknown-key detection.
@@ -102,37 +102,23 @@ func Load(path string) (*Config, error) {
 	}
 
 	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	meta, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Detect unknown keys by unmarshaling into a map
-	if err := detectUnknownKeys(data, &cfg); err != nil {
-		return nil, fmt.Errorf("unknown keys in config: %w", err)
+	// Strict unknown-key detection: any key not mapped to the schema is an
+	// error (spec §2/§8: unknown keys fail clearly).
+	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
+		keys := make([]string, 0, len(undecoded))
+		for _, k := range undecoded {
+			keys = append(keys, k.String())
+		}
+		sort.Strings(keys)
+		return nil, fmt.Errorf("unknown keys in config: %s", strings.Join(keys, ", "))
 	}
 
 	return &cfg, nil
-}
-
-// detectUnknownKeys identifies keys not defined in the schema.
-func detectUnknownKeys(data []byte, cfg *Config) error {
-	// Create a temporary struct with all known keys
-	type KnownConfig struct {
-		Agent   AgentConfig   `toml:"agent"`
-		Metrics MetricsConfig `toml:"metrics"`
-		Storage StorageConfig `toml:"storage"`
-		Checks  []CheckConfig `toml:"checks"`
-	}
-
-	var known KnownConfig
-	if err := toml.Unmarshal(data, &known); err != nil {
-		return nil // Parsing error is handled elsewhere
-	}
-
-	// Compare with original to find unknown keys
-	// This is a simplified approach; for production, use a more robust method
-	cfg.unknownKeys = make(map[string]bool)
-	return nil
 }
 
 // Validate validates the configuration according to wp01-config.md requirements.

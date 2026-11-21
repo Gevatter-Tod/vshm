@@ -62,10 +62,33 @@ Target installation must be inspected and evidence recorded in
 `docs/matrix-cli-validation.md` before delivery is enabled (see
 `docs/wp12-outbox-matrix.md`).
 
+WP‑13 (CLI/deployment) is complete: `cmd/vshm` + `internal/cli` expose exactly
+`validate-config`, `validate-matrix`, `check [ID]`, `once`, `status`,
+`test-matrix`, `run` (all errors nonzero and sanitized; `check` never mutates
+incident state or sends; `once` is one full persisted monitoring pass;
+`run` wires scheduler + daily reports + fail‑closed outbox/Matrix delivery).
+`packaging/vshm.service` is the hardened non‑root unit
+(`/usr/lib/systemd/system/vshm.service`, `ExecStart=/usr/bin/vshm run`, full
+sandbox set, journal‑only logging). `Makefile` provides `build`/`test`/`lint`/
+`check`/`release` (CGO_ENABLED=0 linux/amd64 → `dist/vshm-linux-amd64`)/
+`install`/`verify-unit`; `tests/e2e_test.go` runs the end‑to‑end acceptance
+suite (local httptest target, temp SQLite, no Matrix account). Install/upgrade
+runbook: `docs/operations.md` (see `docs/wp13-completion.md`).
+
 ## Toolchain (fixed)
 
 - Go **1.27.3**, `CGO_ENABLED=0`, Linux amd64 only.
 - Pinned: `github.com/BurntSushi/toml v1.6.0`, `github.com/go-sql-driver/mysql v1.10.1`,
   `modernc.org/sqlite v1.61.1` (pure Go).
+
+## Build / test
+
+```bash
+make build        # CGO_ENABLED=0 go build -o vshm ./cmd/vshm
+make test         # go test -race ./...
+make lint         # go vet ./...
+make release      # dist/vshm-linux-amd64 (C-free linux/amd64 artifact)
+make verify-unit  # systemd-analyze verify packaging/vshm.service
+```
 
 ## Build / test

@@ -1,0 +1,7 @@
+# build artifacts
+/vshm
+/dist/
+*.test
+
+# stray local state from manual runs
+/once/

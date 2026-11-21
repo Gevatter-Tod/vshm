@@ -54,6 +54,18 @@ func main() {
 			fmt.Fprintf(os.Stderr, "status: %v\n", err)
 			os.Exit(1)
 		}
+	case "check":
+		checkID, configPath := "", ""
+		if len(args) >= 2 {
+			checkID = args[1]
+		}
+		if len(args) >= 3 {
+			configPath = args[2]
+		}
+		if err := cli.RunCheck(ctx, checkID, configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "check: %v\n", err)
+			os.Exit(1)
+		}
 	case "once":
 		configPath, stateDir := "", ""
 		if len(args) >= 2 {
@@ -110,7 +122,7 @@ func main() {
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
-		fmt.Fprintf(os.Stderr, "Available commands: version, validate-config, status, once, run, validate-matrix, test-matrix\n")
+		fmt.Fprintf(os.Stderr, "Available commands: version, validate-config, validate-matrix, check [ID] [config], once [config] [stateDir], status [stateDir], test-matrix, run [config] [stateDir]\n")
 		os.Exit(1)
 	}
 }

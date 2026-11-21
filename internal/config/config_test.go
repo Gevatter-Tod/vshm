@@ -238,3 +238,36 @@ type = "webdav"
 		})
 	}
 }
+
+func TestLoadRejectsUnknownKeys(t *testing.T) {
+	base := "[agent]\nhost_name = \"h\"\n"
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"top-level", base + "bogus_key = 1\n"},
+		{"agent section", "[agent]\nhost_name = \"h\"\nbogus_agent_key = 1\n"},
+		{"check entry", base + "[[checks]]\ncheck_id = \"c\"\ntype = \"ping\"\nhost = \"127.0.0.1\"\nbogus_check_key = 1\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeTempConfig(t, tc.body))
+			if err == nil {
+				t.Fatal("expected unknown-key error")
+			}
+			if !strings.Contains(err.Error(), "unknown keys") {
+				t.Fatalf("error %q does not mention unknown keys", err)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsExampleConfig(t *testing.T) {
+	cfg, err := Load("../../config/example.toml")
+	if err != nil {
+		t.Fatalf("example.toml must load: %v", err)
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("example.toml must validate: %v", err)
+	}
+}
