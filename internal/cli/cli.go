@@ -20,6 +20,7 @@ import (
 	"github.com/Gevatter-Tod/vshm/internal/config"
 	"github.com/Gevatter-Tod/vshm/internal/incidents"
 	"github.com/Gevatter-Tod/vshm/internal/logging"
+	"github.com/Gevatter-Tod/vshm/internal/matrixtransport"
 	"github.com/Gevatter-Tod/vshm/internal/model"
 	"github.com/Gevatter-Tod/vshm/internal/reports"
 	"github.com/Gevatter-Tod/vshm/internal/scheduler"
@@ -300,4 +301,112 @@ func EnsureSecretsDir(path string) error {
 // ValidateSecretPermissions checks that a secret file has correct permissions.
 func ValidateSecretPermissions(path string) error {
 	return config.ValidateSecretPermissions(path)
+}
+
+// ValidateMatrix validates the matrix-commander-rs installation and configuration.
+// It checks: CLI binary exists, version meets requirements, crypto store is accessible,
+// E2EE is supported, and account/room are configured.
+func ValidateMatrix(ctx context.Context, cliPath, configPath, cryptoStorePath, roomID string) error {
+	logger := logging.New("vshm: ")
+	
+	// Use config values if not provided
+	if cliPath == "" {
+		cliPath = matrixtransport.DefaultCLIPath
+	}
+	if cryptoStorePath == "" {
+		cryptoStorePath = matrixtransport.DefaultCryptoStorePath
+	}
+	if roomID == "" {
+		// Try to get from config
+		if configPath == "" {
+			configPath = config.GetConfigPath()
+		}
+		if configPath != "" {
+			cfg, err := config.Load(configPath)
+			if err == nil {
+				roomID = cfg.Agent.RoomID
+			}
+		}
+	}
+
+	// Validate the matrix CLI
+	result, err := matrixtransport.ValidateMatrixCLI(ctx, cliPath, configPath, cryptoStorePath, roomID, logger)
+	if err != nil {
+		fmt.Printf("Matrix validation FAILED: %v\n", err)
+		fmt.Printf("\nValidation details:\n")
+		fmt.Printf("  CLI found: %v\n", result.CLIFound)
+		fmt.Printf("  Version: %s (OK: %v)\n", result.Version, result.VersionOK)
+		fmt.Printf("  Crypto store: %s (OK: %v)\n", result.CryptoStorePath, result.CryptoStoreOK)
+		fmt.Printf("  Encryption: %v\n", result.EncryptionOK)
+		fmt.Printf("  Room: %s (OK: %v)\n", result.RoomID, result.RoomOK)
+		fmt.Printf("  Reason: %s\n", result.Reason)
+		return fmt.Errorf("matrix validation failed: %w", err)
+	}
+
+	fmt.Printf("Matrix validation PASSED\n")
+	fmt.Printf("\nValidation details:\n")
+	fmt.Printf("  CLI: %s (found)\n", cliPath)
+	fmt.Printf("  Version: %s\n", result.Version)
+	fmt.Printf("  Crypto store: %s\n", result.CryptoStorePath)
+	fmt.Printf("  Encryption: verified\n")
+	if roomID != "" {
+		fmt.Printf("  Room: %s\n", roomID)
+	}
+	fmt.Printf("  All checks passed: %s\n", result.Reason)
+	
+	return nil
+}
+
+// TestMatrix sends a test message via Matrix to verify the transport works.
+// This is the only command that actually sends a message.
+func TestMatrix(ctx context.Context, cliPath, roomID, message string) error {
+	logger := logging.New("vshm: ")
+	
+	// Use default CLI path if not provided
+	if cliPath == "" {
+		cliPath = matrixtransport.DefaultCLIPath
+	}
+	
+	// Create transport
+	cfg := matrixtransport.Config{
+		CLIPath:   cliPath,
+		RoomID:    roomID,
+		Logger:    logger,
+	}
+	
+	transport, err := matrixtransport.New(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create transport: %w", err)
+	}
+
+	// Validate first
+	compat, err := transport.Validate(ctx)
+	if err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+	if !compat.Compatible {
+		return fmt.Errorf("transport not compatible: %s", compat.Reason)
+	}
+
+	// Send test message
+	if message == "" {
+		message = "vshm test message"
+	}
+	
+	fmt.Printf("Sending test message to room %s: %s\n", roomID, message)
+	
+	outcome, err := transport.TestSend(ctx, message)
+	if err != nil {
+		return fmt.Errorf("test send failed: %w", err)
+	}
+
+	fmt.Printf("Test message outcome: %s\n", outcome)
+	
+	if outcome == model.DeliverySuccess {
+		fmt.Println("Test message sent successfully!")
+	} else {
+		fmt.Printf("Warning: test message outcome was %s (may still succeed on retry)\n", outcome)
+	}
+
+	return nil
 }

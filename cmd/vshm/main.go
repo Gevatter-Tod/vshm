@@ -78,9 +78,42 @@ func main() {
 			fmt.Fprintf(os.Stderr, "run: %v\n", err)
 			os.Exit(1)
 		}
+	case "validate-matrix":
+		cliPath, configPath, cryptoStorePath, roomID := "", "", "", ""
+		if len(args) >= 2 {
+			cliPath = args[1]
+		}
+		if len(args) >= 3 {
+			configPath = args[2]
+		}
+		if len(args) >= 4 {
+			cryptoStorePath = args[3]
+		}
+		if len(args) >= 5 {
+			roomID = args[4]
+		}
+		if err := cli.ValidateMatrix(ctx, cliPath, configPath, cryptoStorePath, roomID); err != nil {
+			fmt.Fprintf(os.Stderr, "validate-matrix: %v\n", err)
+			os.Exit(1)
+		}
+	case "test-matrix":
+		cliPath, roomID, message := "", "", ""
+		if len(args) >= 2 {
+			cliPath = args[1]
+		}
+		if len(args) >= 3 {
+			roomID = args[2]
+		}
+		if len(args) >= 4 {
+			message = args[3]
+		}
+		if err := cli.TestMatrix(ctx, cliPath, roomID, message); err != nil {
+			fmt.Fprintf(os.Stderr, "test-matrix: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
-		fmt.Fprintf(os.Stderr, "Available commands: version, validate-config, status, once, run\n")
+		fmt.Fprintf(os.Stderr, "Available commands: version, validate-config, status, once, run, validate-matrix, test-matrix\n")
 		os.Exit(1)
 	}
 }

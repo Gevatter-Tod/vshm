@@ -51,6 +51,17 @@ local‑date key, with DST gap/fold‑aware scheduling at a fixed local `HH:MM`
 (default 09:00), next‑future‑only scheduling and no catch‑up (see
 `docs/wp11-completion.md`).
 
+WP‑12 (outbox & Matrix transport) is complete: `internal/outbox` provides durable
+ordered event delivery with exponential backoff retries (1s to 1h, with jitter),
+24h pending expiry, 30-day delivered retention, and status tracking
+(pending/delivered/expired/evicted/ambiguous). `internal/matrixtransport` implements
+the fail‑closed encrypted Matrix adapter using `matrix-commander-rs` (E2EE
+mandatory). CLI commands `vshm validate-matrix` (non‑sending compatibility check)
+and `vshm test-matrix` (explicit operator‑requested encrypted test) are provided.
+Target installation must be inspected and evidence recorded in
+`docs/matrix-cli-validation.md` before delivery is enabled (see
+`docs/wp12-outbox-matrix.md`).
+
 ## Toolchain (fixed)
 
 - Go **1.27.3**, `CGO_ENABLED=0`, Linux amd64 only.
