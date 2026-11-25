@@ -65,6 +65,12 @@ systemd the unit fails to load rather than silently dropping protections).
   nothing is reset or caught up.
 - Invalid config makes the new process fail clearly without altering persisted
   monitoring state.
+- `[metrics] mounts` omitted/empty means `["/"]` (root mount) at collection time.
+- `[storage]` keys (`pending_max_age`, `min_available_bytes`) are validated, but
+  the running agent currently opens storage with the package defaults
+  (`pending_max_age` 24h, `max_pending` 1000) — configured values are not yet
+  applied at runtime, and `min_available_bytes` is not enforced (the store never
+  probes free disk space). See `docs/wp02-completion.md` known limitations.
 
 ### Example
 
@@ -168,6 +174,11 @@ journalctl -u vshm -n 200                        # sanitized, bounded logs
 sqlite3 /var/lib/vshm/vshm.db "SELECT ..."       # read-only inspection (stop vshm first)
 ```
 
-Pruning (90-day observations, 30-day delivered events, 24h pending expiry,
-oldest-first low-space eviction, WAL checkpoint/recheck) is automatic; see
-`docs/architecture.md`.
+Pruning (90-day observations, 30-day finished outbox events, 24h pending expiry,
+oldest-first drop of pending rows beyond the 1000-row bound with reason
+`queue_full`) is automatic; see `docs/architecture.md`. There is **no** low-space
+eviction in v1: the store never probes free disk space, and
+`storage.min_available_bytes` is accepted/validated in the config but not
+enforced. Disk-full/`ENOSPC` write errors surface as a storage fault in
+`vshm status` and the journal; the agent logs and continues without pruning or
+retrying the failed write.

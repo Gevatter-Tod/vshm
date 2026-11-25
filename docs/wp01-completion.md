@@ -25,18 +25,21 @@ WP-01 implementation is complete. The configuration package provides TOML schema
 - `room_id` - Matrix room ID for notifications
 
 #### [metrics] Section (Optional)
-- `mounts` - Default: [] (empty slice)
+- `mounts` - Stored as `[]` when omitted; the effective default at collection time is `["/"]` (root mount), applied by `metrics.ResolveMounts` — decision recorded in `wp09-completion.md`
 
 #### [storage] Section (Optional)
-- `pending_max_age` - Default: 24h
-- `max_pending` - Default: 1000, must be positive
+- `pending_max_age` - Default: 24h, positive duration
+- `min_available_bytes` - Default: 104857600 (100 MiB), must be positive. Accepted and
+  validated here, but note: the storage package never reads it (it does not probe free disk
+  space), and the CLI does not yet map the `[storage]` section onto `storage.Options` — the
+  store runs with package defaults. See "Known Limitations" in `wp02-completion.md`.
 
 #### [[checks]] List (May Be Empty)
 - `check_id` - Required, format: `[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}`, unique
 - `type` - Required, one of: `systemd`, `http`, `ping`, `mysql`, `webdav`
 - `interval` - Optional override, range: 1m-7d
 - `timeout` - Optional override, range: 1s-300s
-- `secret_file` - Optional path to credential file
+- `credential_file` - Path to INI credential file (optional for HTTP/WebDAV, required for MySQL); permissions validated
 
 ### Check-Specific Fields
 
@@ -53,12 +56,13 @@ WP-01 implementation is complete. The configuration package provides TOML schema
 - `host` - Host to ping
 
 #### mysql
-- `host` - MySQL host
+- `host` - MySQL host (required unless `socket` is set)
 - `port` - MySQL port (default: 3306)
+- `socket` - Local Unix socket (absolute path; mutually exclusive with `host`/`port`/`tls_ca`, no network TLS)
 - `database` - Database to check (optional, explicit check overrides file database)
-- `credential_file` - Credential file path
-- `tls_ca` - Optional TLS CA certificate
-- `query` - Optional query to execute
+- `credential_file` - Required; INI `[client]` with `user`, `password`, optional `database`
+- `tls_ca` - Required for TCP connections (verified TLS with hostname check)
+- `query` - Required; must be a single read-only SELECT (validated by `internal/sqlsafe`)
 
 #### webdav
 - `url` - WebDAV URL
@@ -113,7 +117,8 @@ Runs a single check execution against the provided configuration.
 
 1. **Secret readability rule**: Implemented as "not world-readable" check (mode & 0004 == 0)
 2. **Symlink/hardlink treatment**: Not implemented (spec doesn't define behavior)
-3. **[metrics].mounts omitted default**: Set to empty slice `[]`
+3. **[metrics].mounts omitted default**: Config stores `[]`; `metrics.ResolveMounts` turns an
+   empty list into `["/"]` at collection time (confirmed in WP-09)
 
 ## Testing
 

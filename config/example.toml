@@ -30,6 +30,8 @@
   pending_max_age = "24h"
   
   # min_available_bytes: minimum available disk space (default: 104857600 bytes = 100MB)
+  # NOTE: accepted and validated, but NOT currently enforced — the storage layer
+  # never probes free disk space (see docs/operations.md and docs/wp02-completion.md)
   min_available_bytes = 104857600
 
 # [[checks]] list (may be empty)

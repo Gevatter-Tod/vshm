@@ -67,20 +67,23 @@ WP-00 (Foundation) has been completed. This workpackage established the project 
 
 ## SQLite Schema (internal/storage/schema.go)
 
+The fixed v1 schema as actually implemented (it differs from the *proposed* table names in
+`wp00-foundation.md`; the proposal was marked "proposed — confirm with user" and these are the
+confirmed names):
+
 ### Tables
-- `schema_version` - Schema version tracking
-- `check_state` - Current check state per host
-- `incidents` - Open and resolved incidents
-- `results_history` - Historical check results
-- `outbox` - Queued events for delivery
-- `report_dates` - Report date tracking
-- Outbox status counts are reported through `StoreStatus`; discard counters are not persisted
+- `meta` - Key/value table; stores the schema version (`schema_version = "1"` is rejected if different)
+- `observations` - Every recorded check observation (replaces the proposed `check_state` + `results_history` pair; latest-per-check is derived via `Snapshot`)
+- `incidents` - One row per check (`check_id` PRIMARY KEY) with `state`, `consecutive_failures`, `since`, `last_change`, `last_reason`
+- `outbox` - Queued events with `event_id` UNIQUE and `dedupe_key` UNIQUE (daily-report dedupe uses `dedupe_key`, so no separate `report_dates` table exists)
 
 ### Indexes
-- `incidents_check_idx` - Incident lookup
-- `incidents_one_open_per_check_idx` - Unique open incidents
-- `results_history_completed_idx` - Result history lookup
-- `outbox_pending_order_idx` - Outbox ordering
+- `observations_completed` - on `observations(completed_at)`
+- `observations_check` - on `observations(check_id, completed_at)`
+- `outbox_pending` - on `outbox(status, next_attempt_at)`
+
+Outbox status counts are reported through `StoreStatus`; discard counters are not persisted
+as separate aggregates (per-row `status`/`last_reason` provide the counts).
 
 ## Check Adapters (internal/checks/)
 
